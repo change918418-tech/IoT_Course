@@ -15,7 +15,7 @@
 - 兩個實體按鈕分別控制 LED 換色與觸發 MQTT 溫濕度發佈。
 - `LedService` 作為 RGB LED 的唯一硬體 owner，仲裁按鈕、光感、Web 與預留 MQTT 指令來源。
 - PIR 偵測移動，透過事件觸發無源喇叭旋律。
-- MFRC522 RFID 讀卡，將最後成功讀取結果保存在 RAM 快照。
+- MFRC522 RFID 讀卡，將最後成功結果與最近 5 次讀卡紀錄保存在 RAM 快照。
 - SSD1306 OLED 顯示日期、星期、時間、溫度與濕度。
 - 裝置上的 Microdot HTTP Server 提供儀表板與 REST API。
 - MQTT 連接外部 Broker，發佈溫濕度；遠端 LED 指令目前有解析任務，但 callback 尚未真正接通。
@@ -218,8 +218,8 @@ WiFi、NTP 與 DHT11 的底層操作可能是同步呼叫，會短暫占用協�
 | `dht11_read_task` | 每 2 秒 | DHT11 | 更新溫度／濕度欄位。 |
 | `light_sensor_task` | 每 50 ms | ADC | 依雙門檻提交 `low_light_alert`。 |
 | `led_service.run()` | 每 20 ms frame | LED 命令佇列 | 唯一寫入 RGB LED；執行換色與閃爍效果。 |
-| `rfid_read_task` | 每 500 ms | MFRC522 SPI | 更新最後成功 UID 與時間。 |
-| `pir_monitor_task` | 每 500 ms | PIR GPIO | 偵測首次高電位／低到高，更新狀態並設定 `motion_event`。 |
+| `rfid_read_task` | 每 500 ms | MFRC522 SPI | 更新最後成功 UID／時間，並保留最近5次成功讀卡。 |
+| `pir_monitor_task` | 每 100 ms | PIR GPIO | 非同步防抖：高電位穩定`PIR_HIGH_DEBOUNCE_MS`後觸發一次，低電位穩定`PIR_LOW_REARM_MS`後重新武裝。 |
 | `music_on_motion_task` | 等待 `motion_event` | 事件與喇叭 | 播放旋律；播放期間事件可能合併。 |
 | `oled_display_task` | 每 1 秒 | 時間、DHT RAM 快取 | 更新 OLED 兩行文字。 |
 | `mqtt_publish_task` | 等待 `publish_event` | DHT RAM 快取 | 發佈溫濕度文字 payload；完成後清除 Event。 |
@@ -290,18 +290,27 @@ PIR 低→高
        → Speaker.play_song()
 ```
 
-PIR 與音樂狀態會以 `motion_state` 提供給 `/api/data`。PIR 每次低到高只觸發一次；持續高電位不重播。
+PIR與音樂狀態會以`motion_state`提供給`/api/data`及快速的`/api/motion/status`。`pir_monitor_task()`以100 ms輪詢；高電位連續穩定200 ms才觸發，觸發後持續高電位或短暫低／高抖動不會重複計數，低電位連續穩定1500 ms後才重新武裝。通過重新武裝後的下一次穩定高電位才會加入`recent_detections`，最多保留5筆，供網頁移動偵測卡顯示。
+
+`MOTION_DETECTED_HOLD_MS = 5000`只控制網頁`motion_state.detected`的顯示保持時間；防抖與重新武裝由`PIR_HIGH_DEBOUNCE_MS`及`PIR_LOW_REARM_MS`控制。這些參數都在`config.py`／`config.example.py`提供。
 
 ### RFID 與 Web
 
 ```text
 MFRC522 SPI
   → rfid_read_task()
-  → rfid_state
+  → rfid_state.last_uid／last_read_at
+  → rfid_state.recent_reads（最多5筆）
   → GET /api/data
 ```
 
-沒有卡片時保留最後成功 UID；這是最後讀取紀錄，不表示卡片目前仍在感應區。
+成功讀卡會同時更新最後一筆`last_uid`、`last_read_at`與`recent_reads`；`recent_reads`每筆包含`uid`與`read_at`，超過5筆時移除最舊資料。沒有卡片時保留既有快照，不表示卡片目前仍在感應區。
+
+### LED、RFID、移動偵測的 Web 顯示
+
+`LedService.snapshot()`提供`alert_flash_count`、`alert_flash_total`與`alert_flash_log`。低光警示每完成一組`LIGHT_ALERT_BLINK_COUNT`次閃紅才增加一次`alert_flash_count`，並以整組完成時間建立一筆`sequence`紀錄；未完整閃完的警示不計入。`alert_flash_log`保留最近5個完成事件，供`/api/data`與`/api/led/status`回傳。`index.html`以`閃紅序號：時間`逐行顯示。
+
+`rfid_state.recent_reads`與`motion_state.recent_detections`都是裝置RAM的最近5筆快照。前端每次成功輪詢直接重繪三個區塊，不在瀏覽器另行累積；所以重新整理頁面不會恢復舊事件，裝置重啟也會清空這些紀錄。
 
 ### 遠端 MQTT LED 控制
 
@@ -326,14 +335,116 @@ MFRC522 SPI
 | GET | `/index.html` | 傳回 `index.html`。 |
 | GET | `/assets/uplot/1.6.32/uPlot.iife.min.js` | 以 `Response.send_file()` 串流固定版本的 uPlot JavaScript；長效快取。 |
 | GET | `/assets/uplot/1.6.32/uPlot.min.css` | 以 `Response.send_file()` 回傳固定版本的 uPlot CSS；長效快取。 |
-| GET | `/api/data` | 回傳 `temp`、`humidity`、`light`、`status`、RFID、PIR／音樂狀態與 LED snapshot。 |
+| GET | `/api/data` | 回傳 `temp`、`humidity`、`light`、`light_thresholds`、`status`、RFID、PIR／音樂狀態與 LED snapshot；`light_thresholds`來自`config.py`。 |
+| GET | `/api/motion/status` | 只回傳PIR／喇叭RAM snapshot；不讀取DHT、ADC、SPI或GPIO；設定`Cache-Control: no-store`，供網頁獨立輪詢移動狀態。 |
 | POST | `/api/led/toggle` | 提交 LED `cycle` 命令；接受時回 HTTP 202，busy／queue full／stopped 依原因回 409／429／503。 |
 | GET | `/api/led/status` | 只回傳 LED RAM snapshot；不操作 ADC、DHT、SPI 或 GPIO；設定 `Cache-Control: no-store`。 |
 | GET | `/api/led/commands/<id>` | 查詢有限結果歷史；過期或不存在時回 404。 |
 | POST | `/api/publish` | 設定 MQTT 發佈事件，立即回應，不等待 MQTT 發佈完成。 |
 | GET | `/api/status` | 目前固定回傳 `status: ok` 與 `System running`，不代表所有服務健康。 |
 
-目前沒有認證、HTTPS、WebSocket 或 SSE。前端主要輪詢 `/api/data`，LED 狀態另有快速 `/api/led/status` 路徑。HTTP API 在同網段內可直接被呼叫，後端仍是控制權威，前端提示不能取代後端 busy／輸入檢查。
+目前沒有認證、HTTPS、WebSocket或SSE。前端以`/api/data`取得溫濕度、光照與RFID，另以`/api/motion/status`每1000 ms取得PIR／喇叭RAM快照，LED則使用快速`/api/led/status`路徑。HTTP API在同網段內可直接被呼叫，後端仍是控制權威，前端提示不能取代後端busy／輸入檢查。
+
+### uPlot 靜態資產與前端圖表整合
+
+光照圖表的整合不是把圖表畫在 ESP32，也不是讓 MicroPython 直接產生 Canvas。系統把責任拆成三層：
+
+| 層 | 檔案／路徑 | 責任 |
+|---|---|---|
+| 裝置資料 | `web_server.py` 的 `/api/data` | 讀取目前 ADC 光照值與`config.py`的光照遲滯門檻，序列化為 JSON 的 `light`、`light_thresholds` 欄位；不保存圖表歷史。 |
+| 頁面應用 | `index.html` | 載入 uPlot、輪詢 JSON、在瀏覽器 RAM 保存最近80筆、決定 X／Y 軸範圍與更新圖表。 |
+| 繪圖函式庫 | `/assets/uplot/1.6.32/uPlot.iife.min.js`、`uPlot.min.css` | 提供 uPlot 建構函式、Canvas 折線繪製與圖表 CSS；不接觸 GPIO、ADC 或 MicroPython。 |
+
+#### 1. `index.html` 的兩個資產引用
+
+HTML head 先引用 CSS：
+
+```html
+<link rel="stylesheet" href="/assets/uplot/1.6.32/uPlot.min.css">
+```
+
+body 底部先載入 uPlot JavaScript，再執行本頁 inline JavaScript：
+
+```html
+<script src="/assets/uplot/1.6.32/uPlot.iife.min.js"></script>
+<script>
+    // createLightChart(), updateLightChart() ...
+</script>
+```
+
+這個順序確保 inline script 執行時，全域 `uPlot` 已存在。CSS 與 JavaScript 都使用裝置同源的絕對根路徑，不依賴 CDN、DNS 或外部網路；版本號放進 URL，讓升級資產時可避開長效快取的舊內容。
+
+#### 2. 頁面端資料與圖表生命週期
+
+```text
+瀏覽器 updateData()
+  └─ GET /api/data
+       └─ data.light
+            └─ updateLightChart()
+                 ├─ Number()、限制到 0～4095
+                 ├─ push；超過80筆 shift
+                 ├─ 第一次：new uPlot(options, data, #lightChart)
+                 └─ 後續：setData() + setScale('x') + setScale('y')
+```
+
+`lightHistory` 是頁面分頁自己的 JavaScript 陣列，不是 `web_server.py` 的 Python 全域，也不是 ESP32 Flash 資料庫。重新整理會清空它；`/api/data` 每次只提供目前光照讀值。`createLightChart()` 只建立一個 uPlot instance，後續輪詢更新既有 Canvas，視窗尺寸變更則由 `resizeLightChart()` 呼叫 `setSize()`。
+
+#### 3. 軸範圍與「只顯示兩點」的避免方式
+
+Y 軸在 `index.html` 明確設為 `auto: false`：
+
+- 歷史值全部在 2048 以下：`0～2048`，刻度 `0、512、1024、1536、2048`。
+- 歷史值曾超過 2048：`0～4095`，刻度 `0、1024、2048、3072、4095`。
+
+X 軸也設為 `auto: false`，並提供 identity `range` 函式；每次 `renderLightChart()` 在 `setData(chartData, false)` 後明確設定 `0～max(1, n-1)`。這是必要的更新契約：若只更新資料而保留初始 `0～1`，後續樣本會超出可視範圍，使用者會誤以為折線停止在兩個點。資料超過80筆時，最舊資料被移除，X 軸回到 `0～79`，形成固定寬度的最近資料滑動視窗。
+
+同一個 Canvas draw hook 會畫兩條紅色實線並標示 API 實際數字，例如目前裝置的`暗 500`與`亮 1100`。它們對應`data.light_thresholds.trigger`／`reset`；目前裝置的500～1099是LED低光控制遲滯緩衝區，公開範例設定則是1000～1099。前端只負責把門檻映射成視覺線，真正的低光判斷仍由裝置端 `tasks.light_sensor_task()` 與 LED owner 執行，圖線不會改變 GPIO 或命令仲裁。
+
+`web_server.py` 的 `api_data()` 讀取 `config.LIGHT_ALERT_TRIGGER_ADC` 與 `config.LIGHT_ALERT_RESET_ADC`，放入同一個 JSON 的`light_thresholds`物件；`index.html`在`updateData()`中先呼叫`updateLightThresholds(data.light_thresholds)`，再更新圖表。若只修改裝置端`config.py`，不需要修改HTML，下一次API成功回應會更新紅線位置；若回應暫時缺少欄位，前端保留最後一次有效門檻。
+
+#### 4. `web_server.py` 的靜態資產路由
+
+`web_server_task()` 啟動時呼叫 `load_html()`，只將 `index.html` 讀入 `HTML_PAGE`。uPlot 檔案不併入這個 HTML 字串，而由兩個獨立路由使用 `Response.send_file()` 回應：
+
+```python
+@app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')
+async def uplot_javascript(request):
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.iife.min.js',
+        content_type='application/javascript; charset=utf-8',
+        max_age=31536000)
+
+@app.route('/assets/uplot/1.6.32/uPlot.min.css')
+async def uplot_stylesheet(request):
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.min.css',
+        content_type='text/css; charset=utf-8',
+        max_age=31536000)
+```
+
+`send_file()` 的路徑是 ESP32 檔案系統上的相對路徑；因此 `assets/uplot/1.6.32/` 必須與 `web_server.py` 的執行工作目錄及部署結構相符。JavaScript／CSS 使用各自的 MIME type，`max_age=31536000` 表示瀏覽器可以長期快取。版本升級時必須同時修改 HTML 引用、Python 路由與裝置檔案目錄；只替換同一路徑的檔案，可能因快取讓部分瀏覽器仍使用舊版本。
+
+#### 5. 部署與錯誤邊界
+
+uPlot 整合至少需要下列檔案：
+
+```text
+index.html
+web_server.py
+assets/uplot/1.6.32/uPlot.iife.min.js
+assets/uplot/1.6.32/uPlot.min.css
+assets/uplot/1.6.32/LICENSE
+```
+
+部署後應從瀏覽器 Network 確認：
+
+1. `GET /index.html` 或 `/` 回應新 HTML。
+2. `GET /assets/uplot/1.6.32/uPlot.iife.min.js` 為 HTTP 200，且 MIME type 為 JavaScript。
+3. `GET /assets/uplot/1.6.32/uPlot.min.css` 為 HTTP 200，且 MIME type 為 CSS。
+4. `GET /api/data` 持續回傳含 `light` 的 JSON。
+5. `#lightChart` 產生 uPlot Canvas，光照樣本超過兩筆後 X 軸仍持續延伸。
+
+若只缺 uPlot JavaScript，文字感測卡仍可能更新，但 `createLightChart()` 會顯示圖表元件載入失敗；若只缺 CSS，Canvas 可能存在但尺寸／外觀不完整。這些靜態資產錯誤與 `/api/data` 感測錯誤是不同故障類型，不能以「API 有回應」推論圖表資產已部署成功。
 
 ### MQTT
 
@@ -349,6 +460,8 @@ MFRC522 SPI
 | 入站 LED | 設計上支援 `led:4`／`led=4`，但目前 callback 未接通。 |
 
 `config.py` 的萬用訂閱 `nuu/csie/iot1133/#` 目前沒有被使用；`DEVICE_ID` 沒有傳給 MQTT client 作為 client ID；`MQTT_PORT` 與重連退避欄位也未由 `MqttManager` 明確套用，實際重連依 `mqtt_as` 行為。
+
+`MqttManager.connect()`在連線失敗時保留原始例外類型與訊息（例如`OSError: [Errno 104] ECONNRESET`），以MicroPython可用的字串輸出記錄並回傳`False`；不依賴桌面Python的`traceback`模組。`main.py`的最外層例外路徑也只輸出例外類型／訊息，避免診斷程式再次遮蔽原始網路錯誤。
 
 ## 10. 現況限制與待完善項目
 
@@ -423,7 +536,7 @@ MFRC522 SPI
 | 開機組裝與生命週期 | `boot.py`、`main.py`、`initialize_system()`、`uasyncio.run()`、例外清理。 |
 | 模組化與責任分離 | `main` 組裝、`hardware` 封裝、`communication` 通訊、`services` 控制、`tasks` 協調。 |
 | GPIO 與位元運算 | RGB 3-bit 色碼、上拉輸入、低電位按鈕與安全輸出。 |
-| 感測與資料品質 | DHT 快取、ADC 原始值、PIR 邊緣、RFID 最後成功快照與錯誤狀態。 |
+| 感測與資料品質 | DHT 快取、ADC 原始值、PIR 邊緣與最近5次時間、RFID 最後成功快照與最近5次讀卡狀態。 |
 | 去彈跳與遲滯 | 按鈕穩定檢查、ADC 1000／1100 雙門檻、避免低光重複觸發。 |
 | 控制權與仲裁 | `LedService` 單一 owner、命令 receipt、busy、有限佇列與警示優先權。 |
 | 非同步與事件 | `gather`、`sleep`、`Event`、協同多工、事件合併與同步阻塞操作。 |
@@ -437,7 +550,7 @@ MFRC522 SPI
 
 ## 13. 分析與驗證界線
 
-- 已完成的桌面測試：`python -B -m unittest discover -s tests -v`，目前 20 個測試通過。
+- 已完成的桌面測試：`python -B -m unittest discover -s tests -v`，目前 23 個測試通過。
 - 測試涵蓋 LED owner／遲滯／按鈕、PIR／音樂、RFID 與設定相容性，使用 fake hardware 或測試替身。
 - 尚未由本文件宣稱的驗證：實際 ESP32 開機、GPIO 電氣行為、WiFi、NTP、MQTT Broker、Microdot HTTP、OLED、PIR、喇叭與 RFID 實機運作。
 - 文件中的「目前可用」表示程式路徑在靜態分析或桌面測試中存在；不表示未完成的網路／硬體整合已通過實機驗收。

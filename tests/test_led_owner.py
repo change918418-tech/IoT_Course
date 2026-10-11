@@ -47,6 +47,7 @@ class OwnerTests(unittest.IsolatedAsyncioTestCase):
             spec = importlib.util.spec_from_file_location('owner_test', ROOT / 'services/led_service.py')
             self.module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(self.module)
+        self.module.get_current_time = lambda: ('2026/10/12', '一', '12:00:00')
         self.hw = Hardware()
         self.clock = Clock()
         self.service = self.module.LedService(self.hw, self.clock)
@@ -92,6 +93,10 @@ class OwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.service.busy)
         self.assertFalse(self.service.snapshot()['is_on'])
         self.assertEqual(self.hw.frames[-1], 0)
+        flash_snapshot = self.service.snapshot()
+        self.assertEqual(flash_snapshot['alert_flash_count'], 1)
+        self.assertEqual([item['sequence'] for item in flash_snapshot['alert_flash_log']], [1])
+        self.assertTrue(all(item['time'] == '2026/10/12 12:00:00' for item in flash_snapshot['alert_flash_log']))
 
     async def test_capacity_frame_limit_invalid_input_and_bounded_history(self):
         for _ in range(8):
@@ -136,7 +141,9 @@ class OwnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(service.submit('cycle', 'web')['reason'], 'stopped')
 
     async def test_light_hysteresis_and_button_press_consumption(self):
-        readings = iter([999, 500, 1050, 1100, 1000, 999])
+        trigger = config.LIGHT_ALERT_TRIGGER_ADC
+        reset = config.LIGHT_ALERT_RESET_ADC
+        readings = iter([trigger - 1, trigger, (trigger + reset) // 2, reset, reset - 1, trigger - 1])
         count = 0
         receipts = []
         async def sleep(_):
@@ -153,6 +160,9 @@ class OwnerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(StopCycles):
             await run(types.SimpleNamespace(read=lambda: next(readings)), self.service)
         self.assertEqual(len(receipts), 2)
+        alert_snapshot = self.service.snapshot()
+        self.assertEqual(alert_snapshot['alert_flash_count'], 2)
+        self.assertEqual([item['sequence'] for item in alert_snapshot['alert_flash_log']], [1, 2])
         owner = self.service
         class Button:
             count = 0

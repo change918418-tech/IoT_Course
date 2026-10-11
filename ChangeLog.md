@@ -16,6 +16,136 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261012-020｜縮短PIR重新武裝等待
+
+- **類別：**BUG（實機已能偵測並播放，但下一次移動需等待過久）。
+- **日期／紀錄時間：**2026-10-12 01:52:10 +08:00，工具取得台北時間。
+- **原因：**上一版`PIR_LOW_REARM_MS = 5000`要求PIR低電位連續穩定5秒後才重新武裝，因此一次事件結束後的下一次偵測會顯得遲鈍。
+- **作法：**將私人`config.py`與公開`config.example.py`的`PIR_LOW_REARM_MS`由5000調整為1500 ms；`tasks.py`缺少設定時的預設值同步調整為1500。保留100 ms輪詢與200 ms高電位確認，仍以穩定低電位重新武裝，避免退回500 ms時較容易出現同一次靠近重複觸發的問題；同步更新兩份架構文件。
+- **影響：**PIR在低電位穩定1.5秒後可再次偵測；短暫低／高抖動仍不會重新計數。1500 ms是防重複與回應速度的折衷值，若實機模組仍有分離脈衝，需再依波形或實測調整。
+- **驗證：**PIR專項測試6/6通過；完整Python測試24/24通過；前端LED／RFID／移動狀態測試通過；指定Python檔案`py_compile`通過；Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過；`git diff --check`無差異錯誤。測試驗證穩定低電位重新武裝後仍可再次觸發；未進行ESP32實機驗證。
+- **部署／回復：**重新上傳`tasks.py`與私人`config.py`並重啟ESP32；`config.example.py`、文件與`ChangeLog.md`供版控／教學使用，不上傳到裝置。回復時將兩個裝置檔案的`PIR_LOW_REARM_MS`改回5000。
+
+## CHG-20261012-019｜讓移動／喇叭狀態獨立更新網頁
+
+- **類別：**BUG（PIR已觸發並播放音樂，但網頁的移動狀態未及時更新）。
+- **日期／紀錄時間：**2026-10-12 01:40:10 +08:00，工具取得台北時間。
+- **原因：**前端原本只透過`GET /api/data`取得移動狀態；該API同時讀取DHT與ADC，慢感測或回應延遲時，PIR／喇叭RAM快照也會被一起延遲。此項以程式路徑分析定位，未宣稱已在ESP32重現每一個阻塞時序。
+- **作法：**新增`GET /api/motion/status`，只複製`motion_state`快照並回`Cache-Control: no-store`；`index.html`新增獨立的`updateMotionStatus()`／`pollMotionStatus()`，每1000 ms輪詢且同一時間只保留一筆請求。`/api/data`仍保留`motion`欄位以維持既有API相容性。
+- **影響：**PIR偵測時間、去抖與喇叭播放邏輯不變；網頁移動文字、最近5次紀錄、次數與喇叭狀態不再依賴完整感測資料API完成。同步更新前端測試、API測試、`WEB_UI_EXECUTION_GUIDE.md`與`SYSTEM_ARCHITECTURE.md`。
+- **驗證：**前端RFID／移動狀態測試與LED輪詢測試通過；完整Python測試24/24通過，指定檔案`py_compile`通過，Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過，`git diff --check`無差異錯誤。測試確認獨立API快照可更新移動文字與喇叭狀態。未進行ESP32實機驗證。
+- **部署／回復：**重新上傳`index.html`與`web_server.py`並重啟ESP32，使`HTML_PAGE`重新載入；不需上傳`tasks.py`或`config.py`。若需回復，還原上述兩個程式檔案與前端／API測試、文件變更。
+
+## CHG-20261012-018｜修正MicroPython MQTT例外診斷遮蔽原始錯誤
+
+- **類別：**BUG（MQTT連線錯誤被缺少的`traceback`模組再次覆蓋）。
+- **日期／紀錄時間：**2026-10-12 01:30:05 +08:00，工具取得台北時間。
+- **原因：**`mqtt_client.py`捕捉到`[Errno 104] ECONNRESET`後匯入桌面Python的`traceback`；ESP32的MicroPython環境沒有該模組，因此原始網路錯誤被替換成`no module named 'traceback'`並冒泡到`main.py`。`main.py`最外層也有相同不相容匯入。
+- **作法：**移除`communication/mqtt_client.py`與`main.py`的`traceback`匯入／呼叫；連線失敗改以`type(e).__name__`與`str(e)`輸出原始例外並回傳`False`，主程式致命錯誤路徑也採相容字串輸出。新增MQTT測試替身，確認`OSError(104, 'ECONNRESET')`不再被`ModuleNotFoundError`遮蔽。
+- **影響：**ESP32將看到類似`OSError: [Errno 104] ECONNRESET`的真正連線錯誤，MQTT初始連線仍依`main.py`既有3次嘗試與其他功能繼續運行政策處理；未改變Broker、TLS或重連策略。
+- **驗證：**MQTT例外回歸測試通過；完整Python測試24/24通過，Node前端測試通過，指定Python檔案`py_compile`通過，Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過。測試以fake MQTT client重現`OSError(104, 'ECONNRESET')`並確認回傳`False`且不再拋出`ModuleNotFoundError`。未進行ESP32實機或Broker端到端驗證。
+- **部署／回復：**重新上傳`communication/mqtt_client.py`與`main.py`，重啟ESP32；若只需恢復診斷文字，還原這兩個檔案即可。`lib/mqtt_as.py`與私人`config.py`不需因本修正變更。
+
+## CHG-20261012-017｜延長PIR穩定低電位重新武裝時間
+
+- **類別：**BUG（實機仍出現同一次靠近的兩次事件）。
+- **日期／紀錄時間：**2026-10-12 01:22:04 +08:00，工具取得台北時間。
+- **原因：**上一版非同步狀態機只要求低電位穩定500 ms；實際PIR模組在同一次手部靠近期間可能產生間隔超過500 ms但仍屬同一反應的第二個高脈衝，因此狀態機已重新武裝後再次計數。
+- **作法：**將`PIR_LOW_REARM_MS`由500調整為5000，保留100 ms非同步取樣與200 ms穩定高電位確認。只有低電位連續穩定5秒才重新武裝，避免PIR模組的分離脈衝被當成兩次移動；同步更新私人設定指引、公開設定範例、測試時序與兩份文件。
+- **影響：**一次移動事件結束後，需持續無移動5秒才允許下一次事件；5秒內的第二次真實移動會合併為同一事件。5秒是目前針對使用者實機現象的保守參數，仍可依PIR模組輸出調整。
+- **驗證：**PIR／音樂測試6/6通過；完整Python測試23/23通過；Node前端測試通過；指定Python檔案`py_compile`通過；Mermaid 11.13.0解析13/13通過。測試涵蓋tick回繞、短暫低／高抖動、穩定低5秒重新武裝與最近5筆歷史。未進行ESP32實機驗證。
+- **部署／回復：**更新`tasks.py`，並在裝置私人`config.py`將`PIR_LOW_REARM_MS`改為5000；不可用公開範例覆蓋私人WiFi設定。重啟ESP32後再觀察實際PIR；回復時將此參數還原為500（若要回復上一版狀態機行為，也需同步還原`tasks.py`）。
+
+## CHG-20261012-016｜實作PIR非同步穩定邊緣防抖
+
+- **類別：**需求變更（PIR事件判斷改善）。
+- **日期／紀錄時間：**2026-10-12 01:09:45 +08:00，工具取得台北時間。
+- **原因：**固定`PIR_RETRIGGER_COOLDOWN_MS = 5000`只能以時間抑制重複事件，無法判斷移動是否真正結束；它可能吞掉5秒內真正分開的第二次移動。使用者要求實作較好的非同步防抖機制。
+- **作法：**`tasks.py`改用非阻塞穩定邊緣狀態機：每100 ms取樣，PIR高電位連續200 ms才觸發一次；觸發後保持未武裝，低電位連續500 ms才重新武裝；短暫低／高抖動不會重新計數。新增`PIR_HIGH_DEBOUNCE_MS`、`PIR_LOW_REARM_MS`與`MOTION_DETECTED_HOLD_MS`設定，移除固定冷卻參數；`MOTION_DETECTED_HOLD_MS`只保留網頁顯示保持語意。更新`config.example.py`、PIR測試與兩份文件。
+- **影響：**一次手部靠近的PIR訊號必須先穩定高才計數；同一次事件內的高電位持續或短暫低／高抖動不會重複觸發。下一次事件必須先完成穩定低重新武裝。輪詢由500 ms改為100 ms，增加取樣頻率但仍使用uasyncio非同步睡眠，不阻塞其他任務。
+- **驗證：**PIR／音樂測試6/6通過；完整Python測試23/23通過；Node前端測試通過；指定Python檔案`py_compile`通過；Mermaid 11.13.0解析13/13通過；測試涵蓋初始高電位、tick回繞、短暫低／高抖動、穩定低重新武裝與最近5筆歷史。未進行ESP32實機驗證。
+- **部署／回復：**更新`tasks.py`；在裝置私人`config.py`同步加入`PIR_POLL_INTERVAL_MS = 100`、`PIR_HIGH_DEBOUNCE_MS = 200`、`PIR_LOW_REARM_MS = 500`、`MOTION_DETECTED_HOLD_MS = 5000`，不可用公開範例覆蓋私人WiFi設定。同步更新時可上傳`config.example.py`僅作公開基線；重啟ESP32後觀察實際PIR，再依硬體輸出調整三個時間參數。回復時還原`tasks.py`與私人設定的新增欄位。
+
+## CHG-20261012-015｜補充PIR冷卻值來源與狀態機改進提案
+
+- **類別：**需求變更（文件澄清）。
+- **日期／紀錄時間：**2026-10-12 01:05:19 +08:00，工具取得台北時間。
+- **原因：**使用者詢問`5000ms`的來源及是否存在比固定冷卻時間更好的PIR判斷方式；現行文件只描述5秒行為，沒有明確標示它是沿用的啟發式，也沒有區分尚未實作的狀態機提案。
+- **作法：**同步更新`WEB_UI_EXECUTION_GUIDE.md`與`SYSTEM_ARCHITECTURE.md`：明確說明5000 ms來自既有`detected`保持時間、不是硬體校正值；補充「穩定高電位確認、觸發一次、穩定低電位重新武裝」狀態機作為改進提案，並標示目前尚未實作。
+- **影響：**只修改教學／架構說明，不改變目前ESP32行為；現行程式仍使用`PIR_RETRIGGER_COOLDOWN_MS = 5000`。提案不可當成已部署功能。
+- **驗證：**Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過；本次沒有修改程式，因此沿用CHG-20261012-014已記錄的23/23 Python、Node與語法驗證。未進行ESP32實機驗證。
+- **部署／回復：**不需重新上傳韌體；同步納入兩份文件與`ChangeLog.md`即可。回復時還原本紀錄涉及的文件段落。
+
+## CHG-20261012-014｜抑制單次移動造成的重複PIR偵測
+
+- **類別：**BUG（一次手靠近被計為兩次移動）。
+- **日期／紀錄時間：**2026-10-12 00:56:11 +08:00，工具取得台北時間。
+- **原因：**`pir_monitor_task()`只依前一輪的高／低電位判斷低到高邊緣；PIR輸出若在同一次靠近期間短暫低再回高，500 ms輪詢會把抖動視為第二次移動。原本的5秒`detected`顯示保持時間沒有阻止事件計數再次增加。
+- **作法：**新增`PIR_RETRIGGER_COOLDOWN_MS = 5000`（同步更新`config.example.py`），`tasks.py`在低到高邊緣觸發前檢查距離上次有效偵測的時間；冷卻期間只更新目前感測狀態，不設定新的`motion_event`、不增加`count`、不加入`recent_detections`。冷卻後的新低到高才視為新事件。
+- **影響：**同一次移動造成的短暫低／高抖動不再重複播放音樂或增加網頁移動次數；目前5秒內的第二次真實靠近也會被視為同一事件，需依實機感測器特性調整`PIR_RETRIGGER_COOLDOWN_MS`。預設值與既有5秒顯示保持時間一致。
+- **驗證：**PIR／音樂測試6/6通過，新增測試確認冷卻期間的第二個低到高被抑制、冷卻後可重新計數；完整Python測試23/23通過，Node前端測試通過，指定Python檔案`py_compile`通過；Web／系統文件Mermaid 11.13.0解析13/13通過。未進行ESP32實機驗證。
+- **部署／回復：**需更新`tasks.py`；建議在裝置私人`config.py`加入`PIR_RETRIGGER_COOLDOWN_MS = 5000`，不可用公開`config.example.py`覆蓋私人WiFi設定；`config.py`未加入版本控制。`index.html`與`web_server.py`本次不因PIR去重而必須更新，除非尚未部署前一版狀態API／網頁修改。回復時還原`tasks.py`與設定範例，並重啟ESP32。
+
+## CHG-20261012-013｜修正閃紅次數為完整警示事件次數
+
+- **類別：**BUG（LED閃紅計數語意不符合需求）。
+- **日期／紀錄時間：**2026-10-12 00:44:14 +08:00，工具取得台北時間。
+- **原因：**前一版把低光警示內的每一次紅燈閃爍當成一筆紀錄，因此完整閃紅5次會顯示為5次；使用者定義「完整閃紅5次才算閃紅1次」。
+- **作法：**`services/led_service.py`改為只有完成整組`LIGHT_ALERT_BLINK_COUNT`次閃紅後才增加`alert_flash_count`，並以整組完成時間建立一筆`alert_flash_log`；未完成的警示不計入。事件序號保留最近5筆，序號仍以裝置開機後完成的事件總數遞增。`index.html`移除`次數／5`顯示，改顯示完成事件總數；`web_server.py`沿用相同欄位名稱但同步新的語意。測試、Web／系統架構文件補充完整事件定義。
+- **影響：**例如LED完整閃紅5次後顯示`閃紅次數：1`與`閃紅1：完成時間`；第二次完整警示才顯示`閃紅次數：2`。`alert_flash_total`仍代表一個事件內的閃爍動作數，不是事件次數。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；`python -B -m unittest discover -s tests -v`通過22/22，包含兩個完整警示事件序號驗證；指定Python檔案`py_compile`通過；Chromium以事件級mock確認顯示`閃紅次數：1`與`閃紅1：完成時間`，且uPlot Canvas存在；Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過。未進行ESP32實機驗證。
+- **部署／回復：**需同步部署`index.html`、`web_server.py`、`services/led_service.py`、測試與兩份同步文件；不需重新部署RFID／PIR程式。回復時同步還原本紀錄涉及的檔案，避免前端把事件次數誤顯示為單次閃爍次數。
+
+## CHG-20261012-012｜顯示LED閃紅、RFID與移動偵測最近紀錄
+
+- **類別：**需求變更（狀態可觀測性與網頁卡片顯示）。
+- **日期／紀錄時間：**2026-10-12 00:26:20 +08:00，工具取得台北時間。
+- **原因：**使用者要求LED狀態區顯示閃紅次數及「閃紅序號：時間」，RFID只顯示最近5次「卡號：讀卡時間」，移動偵測只顯示最近5次偵測時間；原本API只保留單筆RFID／PIR摘要，LED也沒有閃紅事件時間。
+- **作法：**`services/led_service.py`在每次低光閃紅開始時以裝置時間記錄`alert_flash_log`，snapshot新增`alert_flash_count`、`alert_flash_total`與紀錄清單；`hardware/rfid.py`與`tasks.py`保留最多5筆`recent_reads`；`hardware/motion.py`與`tasks.py`保留最多5筆`recent_detections`；`web_server.py`的LED fallback同步提供新欄位。`index.html`新增LED閃紅次數／時間列表，RFID與移動卡片改以最近5筆資料重繪。兩份架構／Web教學文件補充API欄位、RAM生命週期與畫面對應；測試加入歷史資料與LED時間紀錄驗證。
+- **影響：**`/api/data`與`/api/led/status`新增LED閃紅紀錄欄位，RFID／PIR快照新增最近紀錄欄位，不移除既有最後一筆欄位。歷史只存在ESP32 RAM，重啟清空；前端不另行累積。LED閃紅紀錄最多依設定的警示次數保存，RFID與移動偵測固定最多5筆。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；`python -B -m unittest discover -s tests -v`通過22/22；指定Python檔案`py_compile`通過；Chromium以模擬API實際檢查LED顯示5筆序號／時間、RFID只顯示輸入6筆中的最後5筆、移動偵測只顯示輸入6筆中的最後5筆，且uPlot Canvas存在；完整文件13/13個Mermaid區塊以Mermaid 11.13.0解析通過。未進行ESP32實機驗證。
+- **部署／回復：**需同步部署`index.html`、`web_server.py`、`services/led_service.py`、`hardware/rfid.py`、`hardware/motion.py`、`tasks.py`及其相依版本文件，重啟ESP32後強制重新整理瀏覽器；不可只上傳`index.html`，因為新欄位由裝置端狀態與API提供。回復時同步還原上述程式、測試、文件與本紀錄，避免前端與API契約不一致。
+
+## CHG-20261012-011｜由/api/data提供光照遲滯門檻
+
+- **類別：**需求變更（API與網頁圖表設定同步）。
+- **日期／紀錄時間：**2026-10-12 00:05:15 +08:00，工具取得時間。
+- **原因：**確認光照紅線不應在`index.html`重複寫死1000／1100；實際裝置`config.py`的觸發值為500、復位值為1100，前端必須使用同一份裝置設定。
+- **作法：**`web_server.py`匯入`config`，讓`/api/data`新增`light_thresholds.trigger`與`light_thresholds.reset`；`index.html`新增`updateLightThresholds()`，從API回應更新uPlot紅線與數字標籤，初次缺少有效欄位時不繪製、已取得有效值後暫時缺欄位則保留最後值。更新Python／Node測試與兩份uPlot整合文件。
+- **影響：**`/api/data`回應新增欄位，不移除既有欄位；光照紅線會顯示裝置實際門檻，例如目前`暗 500`／`亮 1100`。不改變80筆歷史、移動平均（仍未加入）、ADC取樣或LED後端控制。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Python桌面回歸測試20/20通過；`py_compile web_server.py`通過；Chromium以模擬API先提供500／1100、再改提供700／1200，確認前端門檻診斷值同步更新且uPlot圖表仍正常；Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過。未進行ESP32實機驗證。
+- **部署／回復：**同步部署`web_server.py`與`index.html`，重啟ESP32並強制重新整理；回復時兩者與文件、`ChangeLog.md`需同步還原，避免前端期待不存在的`light_thresholds`欄位。
+
+## CHG-20261011-010｜在光照圖加入亮暗遲滯紅線
+
+- **類別：**需求變更（網頁圖表操作提示）。
+- **日期／紀錄時間：**2026-10-11 23:52:01 +08:00，工具取得時間。
+- **原因：**使用者希望在光照折線圖中直接看見亮暗控制的緩衝區，並以數字標示兩條邊界。
+- **作法：**`index.html`新增`LIGHT_ALERT_TRIGGER_ADC = 1000`與`LIGHT_ALERT_RESET_ADC = 1100`，透過uPlot`hooks.draw`繪製兩條紅色實線，分別標示`暗 1000`與`亮 1100`；1000～1099的遲滯區間不加入移動平均，也不改變原始光照資料與LED後端判斷。
+- **影響：**圖表在目前0～2048或高值時0～4095的Y軸內顯示兩條操作參考線；前端門檻常數必須與裝置端`config.py`保持一致。API、80筆歷史視窗、uPlot資產與ESP32控制邏輯不變。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Chromium以本機uPlot資產及模擬API確認0～2048與擴展至4095時，1000／1100兩條紅色實線及標籤都有Canvas紅色像素；未進行ESP32實機驗證。
+- **部署／回復：**只需部署更新後的`index.html`；回復時還原本紀錄前的`index.html`、文件與`ChangeLog.md`即可。
+
+## CHG-20261011-009｜光照歷史折線改顯示最近80筆
+
+- **類別：**需求變更（網頁圖表顯示範圍）。
+- **日期／紀錄時間：**2026-10-11 23:32:39 +08:00，工具取得時間。
+- **原因：**使用者希望利用整列光照卡片顯示較長的光照歷史，先觀察80筆原始資料的折線效果；本次不加入移動平均或其他濾波。
+- **作法：**`index.html`將`LIGHT_HISTORY_LIMIT`由20改為80，光照卡片說明文字、`WEB_UI_EXECUTION_GUIDE.md`與`SYSTEM_ARCHITECTURE.md`同步改為最近80筆，X軸滑動視窗同步維持`0～79`；資料仍限制在0～4095並沿用2048／4095自適應Y軸。
+- **影響：**以目前約每秒一次的感測輪詢，圖表約涵蓋80秒；歷史仍只存在瀏覽器RAM，`/api/data`、ESP32後端與uPlot資產不變。80筆增加的是觀察時間範圍，不等同數學上的平滑處理。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Chromium以本機uPlot資產及模擬API加入81筆原始樣本，確認保留80筆、X軸為`0～79`、Canvas存在且最後資料仍為原始值，未套用移動平均。未進行ESP32實機驗證。
+- **部署／回復：**只需部署更新後的`index.html`；文件同步納入版本庫。回復時還原本紀錄前的`index.html`、`WEB_UI_EXECUTION_GUIDE.md`、`SYSTEM_ARCHITECTURE.md`與`ChangeLog.md`即可。
+
+## CHG-20261011-008｜補充uPlot與Web資產整合教學文件
+
+- **類別：**需求變更（文件補充）。
+- **日期／紀錄時間：**2026-10-11 23:24:01 +08:00，工具取得時間。
+- **原因：**使用者要求詳細說明uPlot如何整合進`index.html`與`web_server.py`（使用者訊息中的`web_server.ph`依目前專案實際檔名更正為`.py`），讓載入順序、資料生命週期、軸範圍、靜態資產路由、快取與ESP32部署責任清楚可追蹤。
+- **作法：**在`WEB_UI_EXECUTION_GUIDE.md`新增uPlot整合專節，說明HTML引用、`updateLightChart()`資料流、20筆瀏覽器歷史、X／Y軸設定、Canvas更新、錯誤定位與`Response.send_file()`路由；在`SYSTEM_ARCHITECTURE.md`新增裝置資料／頁面應用／繪圖函式庫的責任分層、部署檢核與故障邊界。
+- **影響：**只修改教學與架構文件，不改變程式、API、部署資產或裝置行為；兩份Markdown的整理時間更新為2026-10-11 23:23:20 +08:00。
+- **驗證：**Mermaid 11.13.0實際解析`WEB_UI_EXECUTION_GUIDE.md` 12/12、`SYSTEM_ARCHITECTURE.md` 1/1，共13/13個圖表區塊通過；uPlot URL、路由、函式名稱與部署檔案以目前`index.html`／`web_server.py`實作交叉檢查一致。未進行ESP32實機驗證。
+- **部署／回復：**文件可直接納入版本庫；回復時還原本紀錄前的`WEB_UI_EXECUTION_GUIDE.md`、`SYSTEM_ARCHITECTURE.md`與`ChangeLog.md`即可。
+
 ## CHG-20261011-007｜修正uPlot光照折線只顯示前兩點
 
 - **類別：**BUG（光照圖表更新）。

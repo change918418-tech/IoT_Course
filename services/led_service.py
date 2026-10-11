@@ -2,6 +2,7 @@
 import time
 import uasyncio
 import config
+from communication.wifi import get_current_time
 
 
 class LedService:
@@ -19,6 +20,8 @@ class LedService:
         self._effect = None
         self._inflight = None
         self._error = None
+        self._alert_count = 0
+        self._alert_log = []
         self.frame_ms = 20
         self.capacity = 8
         self.result_capacity = 16
@@ -74,6 +77,9 @@ class LedService:
         return {'available': not self._stopping, 'alert_active': self.busy,
                 'color_index': self._desired_color, 'is_on': self._desired_on,
                 'queue_depth': len(self._queue), 'error': self._error,
+                'alert_flash_count': self._alert_count,
+                'alert_flash_total': getattr(config, 'LIGHT_ALERT_BLINK_COUNT', 5),
+                'alert_flash_log': [dict(item) for item in self._alert_log],
                 'last_command': dict(self._results[-1]) if self._results else None}
 
     def request_stop(self):
@@ -83,6 +89,19 @@ class LedService:
 
     async def wait_stopped(self):
         await self._stopped.wait()
+    def _record_alert_event(self):
+        try:
+            date_str, _, time_str = get_current_time()
+            timestamp = '{} {}'.format(date_str, time_str)
+        except Exception:
+            timestamp = '時間未知'
+        self._alert_count += 1
+        self._alert_log.append({
+            'sequence': self._alert_count,
+            'time': timestamp
+        })
+        if len(self._alert_log) > 5:
+            self._alert_log.pop(0)
 
     def _apply(self, kind, value, receipt, now):
         if kind == 'low_light_alert':
@@ -90,8 +109,8 @@ class LedService:
                 'count': getattr(config, 'LIGHT_ALERT_BLINK_COUNT', 5),
                 'on_ms': getattr(config, 'LIGHT_ALERT_ON_MS', 300),
                 'off_ms': getattr(config, 'LIGHT_ALERT_OFF_MS', 300),
-                'saved': (self._desired_color, self._desired_on), 'receipt': receipt}
-            receipt['status'] = 'executing'
+                'saved': (self._desired_color, self._desired_on),
+                'receipt': receipt}
         elif self.busy:
             receipt.update(status='rejected', reason='busy')
         else:
@@ -127,6 +146,7 @@ class LedService:
                     effect['completed'] += 1
                     if effect['completed'] >= effect['count']:
                         self._desired_color, self._desired_on = effect['saved']
+                        self._record_alert_event()
                         finished = effect['receipt']
                         self._effect = None
                     else:
@@ -158,10 +178,13 @@ class LedService:
             raise
         finally:
             self._stopping = True
+            for kind, _, receipt in self._queue:
+                if kind == 'low_light_alert' and receipt['status'] == 'accepted':
+                    receipt.update(status='cancelled', reason='stopped')
             self._reject_pending('stopped')
             if self._effect is not None:
                 receipt = self._effect['receipt']
-                if receipt['status'] == 'executing':
+                if receipt['status'] in ('accepted', 'executing'):
                     receipt.update(status='cancelled', reason='stopped')
             self._effect = None
             self._reserved = False

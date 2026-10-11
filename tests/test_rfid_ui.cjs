@@ -10,9 +10,10 @@ const ids = [...html.matchAll(/id="([^"]+)"/g)].map(m => m[1]);
 ids.forEach(id => elements[id] = { textContent: '', style: {}, attributes: {}, clientWidth: 600, setAttribute(name, value) { this.attributes[name] = String(value); } });
 let fail = false;
 let now = 0;
-let rfid = {status: 'ready', last_uid: '0102030404', last_read_at: '2026-10-06 00:30:00', error: null};
-let motion = {sensor_status: 'ready', detected: false, count: 0, last_detected_at: null, music_status: 'idle'};
-let led = {available: true, alert_active: false};
+let rfid = {status: 'ready', last_uid: '0102030404', last_read_at: '2026-10-06 00:30:00', recent_reads: [{uid: '0102030404', read_at: '2026-10-06 00:30:00'}], error: null};
+let motion = {sensor_status: 'ready', detected: false, count: 0, last_detected_at: null, recent_detections: [], music_status: 'idle'};
+let motionStatus = motion;
+let led = {available: true, alert_active: false, alert_flash_count: 1, alert_flash_total: 5, alert_flash_log: [{sequence: 1, time: '2026-10-06 00:35:00'}]};
 let posts = 0;
 let postStatus = 202;
 let commandStatus = 'executed';
@@ -35,22 +36,27 @@ const context = vm.createContext({
             return {ok: postStatus === 202, status: postStatus, json: async () => ({id: 9, status: postStatus === 202 ? 'accepted' : 'rejected', reason: 'busy'})};
         }
         if (url === '/api/led/status') return {ok: true, json: async () => ({...led})};
+        if (url === '/api/motion/status') return {ok: true, json: async () => ({...motionStatus})};
         if (url.startsWith('/api/led/commands/')) return {ok: true, json: async () => ({id: 9, status: commandStatus, reason: 'alert_started'})};
-        return {ok: true, json: async () => ({temp: 0, humidity: 0, light: 0, rfid, motion, led})};
+        return {ok: true, json: async () => ({temp: 0, humidity: 0, light: 0, light_thresholds: {trigger: 500, reset: 1100}, rfid, motion, led})};
     },
     performance: {now: () => now}, AbortController, setTimeout() {return 1;}, clearTimeout() {}, alert() {}, console: {log() {}, error() {}}
 });
 (async () => {
     vm.runInContext(source, context);
     await new Promise(setImmediate);
+    await new Promise(setImmediate);
     async function refresh() { await context.updateData(); await context.updateLedStatus(); }
     await refresh();
-    assert.equal(elements.rfidUid.textContent, '0102030404');
-    assert.equal(elements.lightCard.textContent, 0);
+    assert.equal(elements.rfidHistory.textContent, '0102030404：2026-10-06 00:30:00');
+    assert.equal(elements.ledFlashCount.textContent, '閃紅次數：1');
+    assert.equal(elements.ledFlashHistory.textContent, '閃紅1：2026-10-06 00:35:00');
     const lightDiagnostics = context.getLightChartDiagnostics();
     assert.equal(lightDiagnostics.ready, true);
     assert.ok(lightDiagnostics.sampleCount >= 1);
     assert.equal(lightDiagnostics.scaleMax, 2048);
+    assert.equal(lightDiagnostics.thresholds.trigger, 500);
+    assert.equal(lightDiagnostics.thresholds.reset, 1100);
     assert.equal(elements.tempCard.textContent, 0);
     assert.equal(elements.ledButton.disabled, false);
     led.alert_active = true;
@@ -79,19 +85,25 @@ const context = vm.createContext({
     assert.equal(elements.ledButton.disabled, false);
     assert.equal(elements.motionMessage.textContent, '等待移動');
     assert.equal(elements.motionCount.textContent, 0);
-    motion = {...motion, detected: true, count: 1, last_detected_at: '2026-10-06 02:41:04', music_status: 'playing'};
+    motionStatus = {...motion, detected: true, count: 1, last_detected_at: '2026-10-06 02:41:04',
+        recent_detections: ['2026-10-06 02:41:04'], music_status: 'playing'};
+    await context.updateMotionStatus();
+    assert.equal(elements.motionMessage.textContent, '偵測到移動物');
+    assert.equal(elements.musicStatus.textContent, '播放中');
+    motionStatus = motion;
+    motion = {...motion, detected: true, count: 1, last_detected_at: '2026-10-06 02:41:04', recent_detections: ['2026-10-06 02:41:04'], music_status: 'playing'};
     await refresh();
     assert.equal(elements.motionMessage.textContent, '偵測到移動物');
     assert.equal(elements.musicStatus.textContent, '播放中');
-    assert.equal(elements.motionTime.textContent, motion.last_detected_at);
+    assert.equal(elements.motionHistory.textContent, '移動1：' + motion.last_detected_at);
     motion = {...motion, detected: false, music_status: 'completed'};
     await refresh();
     assert.equal(elements.motionMessage.textContent, '等待移動');
     assert.equal(elements.motionCount.textContent, 1);
     assert.equal(elements.musicStatus.textContent, '播放完成');
-    rfid = {status: 'init_error', last_uid: null, last_read_at: null, error: '<not html>'};
+    rfid = {status: 'init_error', last_uid: null, last_read_at: null, recent_reads: [], error: '<not html>'};
     await refresh();
-    assert.equal(elements.rfidUid.textContent, '尚未讀卡');
+    assert.equal(elements.rfidHistory.textContent, '尚未讀卡');
     assert.equal(elements.rfidStatus.textContent, '初始化失敗');
     assert.equal(elements.rfidError.textContent, '<not html>');
     fail = true;

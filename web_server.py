@@ -17,6 +17,7 @@ except ImportError:
     import json
 from hardware.rfid import new_rfid_state
 from hardware.motion import new_motion_state
+import config
 
 # ==================== 全局變數 ====================
 
@@ -158,7 +159,7 @@ async def api_data(request):
     """
     API 端點：返回傳感器數據（JSON 格式）
     ✅ 修復：添加光照值返回
-    返回：{ temp, humidity, light, status, rfid: 最後讀取狀態快照 }
+    返回：{ temp, humidity, light, light_thresholds, status, rfid: 最後讀取狀態快照 }
     """
     #print("[Web] GET /api/data")
     
@@ -175,14 +176,28 @@ async def api_data(request):
     # 序列化保證 None -> null，錯誤訊息中的引號也會正確跳脫。
     response_json = json.dumps({
         'temp': temp, 'humidity': humidity, 'light': light,
+        'light_thresholds': {
+            'trigger': config.LIGHT_ALERT_TRIGGER_ADC,
+            'reset': config.LIGHT_ALERT_RESET_ADC
+        },
         'status': 'ok', 'rfid': dict(rfid_state), 'motion': dict(motion_state),
         'led': led_service.snapshot() if led_service else
-               {'available': False, 'alert_active': False}
+               {'available': False, 'alert_active': False,
+                'alert_flash_count': 0,
+                'alert_flash_total': getattr(config, 'LIGHT_ALERT_BLINK_COUNT', 5),
+                'alert_flash_log': []}
     })
     
     #print(f"[Web] API 返回: 溫度={temp}, 濕度={humidity}, 光照={light}")
     
     return Response(response_json, headers={'Content-Type': 'application/json; charset=utf-8'})
+
+@app.route('/api/motion/status')
+async def api_motion_status(request):
+    """快速回傳PIR／喇叭RAM快照，不讀取DHT、ADC或SPI。"""
+    return Response(json.dumps(dict(motion_state)), headers={
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'})
 
 
 @app.route('/api/led/toggle', methods=['POST'])
@@ -207,7 +222,12 @@ async def api_led_toggle(request):
 @app.route('/api/led/status')
 async def api_led_status(request):
     """Fast snapshot only: no ADC, DHT, SPI or GPIO operation."""
-    snapshot = led_service.snapshot() if led_service else {'available': False, 'alert_active': False}
+    snapshot = led_service.snapshot() if led_service else {
+        'available': False, 'alert_active': False,
+        'alert_flash_count': 0,
+        'alert_flash_total': getattr(config, 'LIGHT_ALERT_BLINK_COUNT', 5),
+        'alert_flash_log': []
+    }
     return Response(json.dumps(snapshot), headers={
         'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store'})
 

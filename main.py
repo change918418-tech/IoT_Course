@@ -202,9 +202,7 @@ if __name__ == '__main__':
         uasyncio.run(main())
     
     except Exception as e:
-        print(f"\n[Fatal Error] 致命錯誤: {e}")
-        import traceback
-        traceback.print_exc()
+        print("\n[Fatal Error] 致命錯誤: {}: {}".format(type(e).__name__, e))
     
     finally:
         print("\n[Shutdown] 程式結束\n")

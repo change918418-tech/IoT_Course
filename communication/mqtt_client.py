@@ -65,9 +65,8 @@ class MqttManager:
                 return True
         
         except Exception as e:
-            print(f"[MQTT] 連線失敗: {e}")
-            import traceback
-            traceback.print_exc()
+            self._connected = False
+            print("[MQTT] 連線失敗: {}: {}".format(type(e).__name__, e))
             return False
     
     

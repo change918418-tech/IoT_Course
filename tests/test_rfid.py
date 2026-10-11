@@ -79,7 +79,30 @@ class RfidTests(unittest.TestCase):
         self.assertEqual(state['status'], 'ready')
         self.assertIsNone(state['error'])
         self.assertEqual(state['last_uid'], 'AABBCCDDEE')
+        self.assertEqual([item['uid'] for item in state['recent_reads']], ['0102030404', 'AABBCCDDEE'])
         self.assertIsNone(new_rfid_state()['last_uid'])
+
+    def test_task_limits_recent_reads_to_five(self):
+        values = iter(['000000000' + str(index) for index in range(1, 7)])
+        state = new_rfid_state()
+        cycles = 0
+        async def sleep(_):
+            nonlocal cycles
+            cycles += 1
+            if cycles == 6:
+                raise StopCycles()
+        class Reader:
+            async def read_uid(self):
+                return next(values)
+        namespace = dict(config=config, uasyncio=types.SimpleNamespace(sleep_ms=sleep),
+                         get_current_time=lambda: ('2026-10-06', '二', '00:30:00'))
+        tree = ast.parse((ROOT / 'tasks.py').read_text(encoding='utf-8'))
+        node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'rfid_read_task')
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'tasks.py', 'exec'), namespace)
+        with self.assertRaises(StopCycles):
+            asyncio.run(namespace['rfid_read_task'](Reader(), state))
+        self.assertEqual([item['uid'] for item in state['recent_reads']],
+                         ['0000000002', '0000000003', '0000000004', '0000000005', '0000000006'])
 
     def test_api_serializes_cache_null_zero_and_quotes(self):
         sys.path.insert(0, str(ROOT / 'lib'))
@@ -97,11 +120,22 @@ class RfidTests(unittest.TestCase):
             self.assertIsNone(data['temp'])
             self.assertIsNone(data['humidity'])
             self.assertEqual(data['light'], 0)
+            self.assertEqual(data['light_thresholds'], {
+                'trigger': config.LIGHT_ALERT_TRIGGER_ADC,
+                'reset': config.LIGHT_ALERT_RESET_ADC
+            })
             self.assertEqual(data['rfid']['error'], 'bad "card"')
             self.assertEqual(data['rfid']['last_uid'], '0102030404')
+            self.assertEqual(data['rfid']['recent_reads'], [])
             self.assertFalse(data['motion']['detected'])
             self.assertEqual(data['motion']['count'], 0)
+            self.assertEqual(data['motion']['recent_detections'], [])
             self.assertIsNone(data['motion']['last_detected_at'])
+            motion_response = asyncio.run(web.api_motion_status(None))
+            motion_body = motion_response.body.decode() if isinstance(motion_response.body, bytes) else motion_response.body
+            motion_data = json.loads(motion_body)
+            self.assertEqual(motion_data['motion'] if 'motion' in motion_data else motion_data, data['motion'])
+            self.assertEqual(motion_response.headers.get('Cache-Control'), 'no-store')
         finally:
             sys.path.remove(str(ROOT / 'lib'))
 

@@ -14,9 +14,28 @@ function FakeUPlot(options, data, element) {
     this.data = data;
     this.element = element;
     this.scales = {x: {}, y: {}};
+    this.bbox = {left: 0, top: 0, width: 600, height: 280};
+    this.ctx = {
+        strokeCount: 0,
+        fillTextCount: 0,
+        save() {},
+        restore() {},
+        setLineDash() {},
+        beginPath() {},
+        moveTo() {},
+        lineTo() {},
+        stroke: () => { this.ctx.strokeCount += 1; },
+        fillText: () => { this.ctx.fillTextCount += 1; }
+    };
+    this.valToPos = (value, key) => {
+        const [min, max] = this.options.scales[key].range;
+        return this.bbox.top + this.bbox.height * (1 - (value - min) / (max - min));
+    };
     this.setData = nextData => { this.data = nextData; };
     this.setScale = (key, limits) => { this.scales[key] = limits; };
     this.setSize = size => { this.size = size; };
+    FakeUPlot.instance = this;
+    this.options.hooks?.draw?.forEach(hook => hook(this));
 }
 const context = vm.createContext({
     performance: {now: () => now}, AbortController, uPlot: FakeUPlot,
@@ -74,13 +93,17 @@ const response = value => ({ok: true, json: async () => value});
     // A sensor success proves connection health, never refreshes LED validity.
     now = 5001;
     const healthySensor = context.updateData();
-    requests.filter(r => r.url === '/api/data').at(-1).gate.resolve(response({light: 123, led: {available:true, alert_active:false}}));
+    requests.filter(r => r.url === '/api/data').at(-1).gate.resolve(response({light: 123, light_thresholds: {trigger: 500, reset: 1100}, led: {available:true, alert_active:false}}));
     await healthySensor;
     const initialLight = context.getLightChartDiagnostics();
     assert.equal(initialLight.ready, true);
     assert.equal(initialLight.sampleCount, 1);
     assert.equal(initialLight.scaleMax, 2048);
     assert.equal(initialLight.xMax, 1);
+    assert.equal(initialLight.thresholds.trigger, 500);
+    assert.equal(initialLight.thresholds.reset, 1100);
+    assert.equal(context.uPlot.instance.ctx.strokeCount, 2);
+    assert.equal(context.uPlot.instance.ctx.fillTextCount, 2);
     context.updateLightChart(4095);
     context.updateLightChart(0);
     const expandedLight = context.getLightChartDiagnostics();
@@ -88,8 +111,12 @@ const response = value => ({ok: true, json: async () => value});
     assert.equal(expandedLight.sampleCount, 3);
     assert.equal(expandedLight.scaleMax, 4095);
     assert.equal(expandedLight.xMax, 2);
+    for (let value = 0; value < 80; value++) context.updateLightChart(value);
+    const rollingLight = context.getLightChartDiagnostics();
+    assert.equal(rollingLight.sampleCount, 80);
+    assert.equal(rollingLight.xMax, 79);
     assert.equal(elements.ledButton.disabled, true);
-    assert.match(elements.ledAlertStatus.textContent, /LED 狀態更新異常/);
+    assert.match(elements.ledAlertStatus.textContent, /暫停操作/);
     now += 5001;
     context.renderLedStatus();
     assert.match(elements.ledAlertStatus.textContent, /連線狀態無法確認/);

@@ -71,39 +71,64 @@ async def button2_task(button2, dht_sensor, mqtt_manager, publish_event):
 # ==================== 任務：感測器讀取 ====================
 
 async def pir_monitor_task(pir_sensor, motion_event, motion_state=None):
-    """首次高電位或後續低→高觸發；持續高電位不重播。"""
+    """非同步穩定邊緣防抖：穩定高電位觸發一次，穩定低電位後重新武裝。"""
     if pir_sensor is None:
         print('[Task] PIR 未初始化，跳過偵測任務')
         return
-    interval = getattr(config, 'PIR_POLL_INTERVAL_MS', 500)
+    interval = getattr(config, 'PIR_POLL_INTERVAL_MS', 100)
+    high_debounce_ms = getattr(config, 'PIR_HIGH_DEBOUNCE_MS', 200)
+    low_rearm_ms = getattr(config, 'PIR_LOW_REARM_MS', 1500)
+    detected_hold_ms = getattr(config, 'MOTION_DETECTED_HOLD_MS', 5000)
     print(f'[Task] PIR 偵測已啟動，輪詢={interval} ms')
-    previous = None
+    armed = True
+    high_since = None
+    low_since = None
     last_detection_ms = None
     while True:
         try:
             current = pir_sensor.is_motion()
-            now_ms = time.ticks_ms() if motion_state is not None else None
-            if previous is not True and current:
-                motion_event.set()
-                date_str, _, time_str = get_current_time()
-                detected_at = '{} {}'.format(date_str, time_str)
-                if motion_state is not None:
-                    last_detection_ms = now_ms
-                    motion_state['last_detected_at'] = detected_at
-                    motion_state['count'] += 1
-                print('[PIR] 偵測到移動，時間：{}，觸發音樂'.format(detected_at))
+            now_ms = time.ticks_ms()
+            if current:
+                low_since = None
+                if armed:
+                    if high_since is None:
+                        high_since = now_ms
+                    elif time.ticks_diff(now_ms, high_since) >= high_debounce_ms:
+                        armed = False
+                        high_since = None
+                        last_detection_ms = now_ms
+                        motion_event.set()
+                        date_str, _, time_str = get_current_time()
+                        detected_at = '{} {}'.format(date_str, time_str)
+                        if motion_state is not None:
+                            motion_state['last_detected_at'] = detected_at
+                            motion_state['recent_detections'].append(detected_at)
+                            if len(motion_state['recent_detections']) > 5:
+                                motion_state['recent_detections'].pop(0)
+                            motion_state['count'] += 1
+                        print('[PIR] 偵測到移動，時間：{}，觸發音樂'.format(detected_at))
+            else:
+                high_since = None
+                if not armed:
+                    if low_since is None:
+                        low_since = now_ms
+                    elif time.ticks_diff(now_ms, low_since) >= low_rearm_ms:
+                        armed = True
+                        low_since = None
+                else:
+                    low_since = None
             if motion_state is not None:
                 motion_state['sensor_status'] = 'ready'
                 motion_state['sensor_error'] = None
                 motion_state['pir_high'] = current
                 motion_state['detected'] = current or (
                     last_detection_ms is not None and
-                    time.ticks_diff(now_ms, last_detection_ms) < 5000)
+                    time.ticks_diff(now_ms, last_detection_ms) < detected_hold_ms)
                 if not motion_state['detected']:
                     last_detection_ms = None
-            previous = current
         except Exception as e:
-            previous = None
+            high_since = None
+            low_since = None
             if motion_state is not None:
                 motion_state['sensor_status'] = 'error'
                 motion_state['sensor_error'] = str(e)
@@ -201,9 +226,13 @@ async def rfid_read_task(rfid_reader, rfid_state):
             uid = await rfid_reader.read_uid()
             if uid is not None:
                 date_str, weekday_str, time_str = get_current_time()
+                read_at = '{} {}'.format(date_str, time_str)
                 # 更新期間沒有 await；協作式排程下 API 不會讀到半份紀錄。
                 rfid_state['last_uid'] = uid
-                rfid_state['last_read_at'] = '{} {}'.format(date_str, time_str)
+                rfid_state['last_read_at'] = read_at
+                rfid_state['recent_reads'].append({'uid': uid, 'read_at': read_at})
+                if len(rfid_state['recent_reads']) > 5:
+                    rfid_state['recent_reads'].pop(0)
                 rfid_state['status'] = 'ready'
                 rfid_state['error'] = None
                 print('RFID：', uid)

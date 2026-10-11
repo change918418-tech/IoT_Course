@@ -129,8 +129,10 @@
             pointer-events: none;
         }
 
-        #rfidUid { overflow-wrap: anywhere; font-size: 1.6em; }
+        #rfidHistory { white-space: pre-line; overflow-wrap: anywhere; font-size: 1.25em; line-height: 1.6; }
         #rfidError { color: #b42318; overflow-wrap: anywhere; }
+        #ledFlashHistory { white-space: pre-line; overflow-wrap: anywhere; font-size: 1em; line-height: 1.5; }
+        #motionHistory { white-space: pre-line; overflow-wrap: anywhere; font-size: 1em; line-height: 1.5; }
         
         .buttons {
             display: grid;
@@ -284,24 +286,23 @@
                 <div id="lightChart" class="light-chart" role="img" aria-label="光照數值折線圖，Y軸依資料範圍顯示">
                     <span id="lightChartEmpty" class="light-chart-empty">等待光照資料</span>
                 </div>
-                <div class="card-unit">ADC 值；一般顯示 0～2048，超過 2048 時擴展至 4095；折線保留最近 20 次讀值</div>
+                <div class="card-unit">ADC 值；一般顯示 0～2048，超過 2048 時擴展至 4095；折線保留最近 80 次讀值</div>
             </div>
         </div>
         
         <div class="cards event-cards">
             <div class="card">
-                <div class="card-title">📇 RFID 最後讀取紀錄</div>
-                <div class="card-value" id="rfidUid">尚未讀卡</div>
-                <p>讀取時間：<span id="rfidReadAt">--</span></p>
+                <div class="card-title">📇 RFID 最近5次讀卡</div>
+                <div class="card-value" id="rfidHistory">尚未讀卡</div>
                 <p>讀卡任務：<span id="rfidStatus">等待資料</span></p>
                 <p id="rfidError"></p>
-                <div class="card-unit">保留最後成功結果（包含檢查碼），不代表卡片仍在感應區；重啟後清空。</div>
+                <div class="card-unit">顯示最近 5 次卡號與讀卡時間；重啟後清空。</div>
             </div>
 
             <div class="card" aria-live="polite">
                 <div class="card-title">🚶 移動偵測與音樂</div>
                 <div class="card-value" id="motionMessage">等待資料</div>
-                <p>最後偵測：<span id="motionTime">--</span></p>
+                <p id="motionHistory">最近 5 次：尚未偵測</p>
                 <p>偵測次數：<span id="motionCount">0</span></p>
                 <p>喇叭：<span id="musicStatus">等待資料</span></p>
                 <p id="motionError"></p>
@@ -313,6 +314,9 @@
             <div class="status-title">💡 LED 狀態</div>
             <p id="ledAlertStatus" role="status" aria-live="polite">LED 狀態載入中</p>
             <p id="ledCommandStatus" role="status" aria-live="polite"></p>
+            <p id="ledFlashCount">閃紅次數：--</p>
+            <p>閃紅序號：時間</p>
+            <p id="ledFlashHistory">尚無閃紅紀錄</p>
         </div>
 
         <div class="buttons">
@@ -331,13 +335,57 @@
         let ledRequestPending = false;
         let ledStatusRequest = null;
         let sensorUpdatePending = false;
+        let motionUpdatePending = false;
         const LED_POLL_MS = 200;
         const LED_STATUS_TIMEOUT_MS = 1000;
+        const SENSOR_POLL_MS = 1000;
+        const MOTION_POLL_MS = 1000;
         const STATUS_VALID_MS = 5000;
-        const LIGHT_HISTORY_LIMIT = 20;
+        const LIGHT_HISTORY_LIMIT = 80;
         const LIGHT_DEFAULT_MAX = 2048;
         const LIGHT_ADC_MAX = 4095;
         const LIGHT_CHART_HEIGHT = 280;
+        const LIGHT_THRESHOLD_COLOR = '#dc2626';
+        let lightThresholds = null;
+
+        function updateLightThresholds(rawThresholds) {
+            const trigger = Number(rawThresholds?.trigger);
+            const reset = Number(rawThresholds?.reset);
+            if (Number.isFinite(trigger) && Number.isFinite(reset)) {
+                lightThresholds = {trigger, reset};
+            }
+        }
+
+        function drawLightThresholds(chart) {
+            if (!lightThresholds) return;
+            const ctx = chart.ctx;
+            const left = chart.bbox.left;
+            const right = left + chart.bbox.width;
+            const thresholds = [
+                {value: lightThresholds.trigger, label: '暗 ' + lightThresholds.trigger, labelOffset: 10},
+                {value: lightThresholds.reset, label: '亮 ' + lightThresholds.reset, labelOffset: -10}
+            ];
+            ctx.save();
+            ctx.strokeStyle = LIGHT_THRESHOLD_COLOR;
+            ctx.fillStyle = LIGHT_THRESHOLD_COLOR;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            thresholds.forEach(({value, label, labelOffset}) => {
+                const y = chart.valToPos(value, 'y', true);
+                if (y < chart.bbox.top || y > chart.bbox.top + chart.bbox.height) return;
+                ctx.beginPath();
+                ctx.moveTo(left, y);
+                ctx.lineTo(right, y);
+                ctx.stroke();
+                ctx.fillText(label, right - 6, y + labelOffset);
+            });
+            ctx.restore();
+        }
+
+
         const lightHistory = [];
         let lightChart = null;
         let lastLedSnapshot = null;
@@ -396,7 +444,8 @@
                     {label: '光照', stroke: '#667eea', width: 3, points: {show: false}}
                 ],
                 legend: {show: false},
-                cursor: {show: false}
+                cursor: {show: false},
+                hooks: {draw: [drawLightThresholds]}
             };
             lightChart = new uPlot(options, getLightChartData(), container);
             return true;
@@ -445,7 +494,8 @@
                 ready: Boolean(lightChart),
                 sampleCount: lightHistory.length,
                 scaleMax: getLightChartMax(),
-                xMax: lightChart?.scales?.x?.max ?? null
+                xMax: lightChart?.scales?.x?.max ?? null,
+                thresholds: lightThresholds ? {...lightThresholds} : null
             };
         }
 
@@ -455,15 +505,39 @@
             lastConnectionSuccessAt = statusNow();
         }
 
+        function renderLedFlashHistory(led) {
+            const countElement = document.getElementById('ledFlashCount');
+            const historyElement = document.getElementById('ledFlashHistory');
+            const count = led && Number.isFinite(Number(led.alert_flash_count))
+                ? Number(led.alert_flash_count)
+                : null;
+            const log = Array.isArray(led?.alert_flash_log)
+                ? led.alert_flash_log.slice(-5)
+                : [];
+            if (countElement) {
+                countElement.textContent = count === null
+                    ? '閃紅次數：--'
+                    : '閃紅次數：' + count;
+            }
+            if (historyElement) {
+                historyElement.textContent = log.length
+                    ? log.map(item => '閃紅' + item.sequence + '：' + item.time).join('\n')
+                    : '尚無閃紅紀錄';
+            }
+        }
+
         function renderLedStatus() {
             const now = statusNow();
             const fresh = lastLedSuccessAt !== null && now - lastLedSuccessAt < STATUS_VALID_MS;
             const connected = lastConnectionSuccessAt !== null && now - lastConnectionSuccessAt < STATUS_VALID_MS;
             const led = lastLedSnapshot;
+            renderLedFlashHistory(led);
+            const alertTotal = Number.isFinite(Number(led?.alert_flash_total))
+                ? Number(led.alert_flash_total) : 5;
             document.getElementById('ledButton').disabled = ledRequestPending || !fresh || !led?.available || Boolean(led?.alert_active);
             document.getElementById('ledAlertStatus').textContent = !fresh
                 ? (connected ? 'LED 狀態更新異常，暫停操作' : '連線狀態無法確認，暫停操作')
-                : (led.alert_active ? '紅燈警示中：閃爍 5 次，改色操作暫停且不排隊'
+                : (led.alert_active ? '紅燈警示中：閃爍 ' + alertTotal + ' 次，改色操作暫停且不排隊'
                     : (led.available ? 'LED 可操作' : 'LED 尚未就緒'));
         }
 
@@ -524,7 +598,26 @@
 
         async function pollSensorData() {
             await updateData();
-            setTimeout(pollSensorData, 1000);
+            setTimeout(pollSensorData, SENSOR_POLL_MS);
+        }
+
+        async function updateMotionStatus() {
+            if (motionUpdatePending) return;
+            motionUpdatePending = true;
+            try {
+                const response = await fetch('/api/motion/status', {cache: 'no-store'});
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                renderMotionStatus(await response.json());
+            } catch (error) {
+                console.error('移動狀態更新失敗:', error);
+            } finally {
+                motionUpdatePending = false;
+            }
+        }
+
+        async function pollMotionStatus() {
+            await updateMotionStatus();
+            setTimeout(pollMotionStatus, MOTION_POLL_MS);
         }
         function showLedStatus(led) {
             lastLedSnapshot = {...led};
@@ -532,6 +625,42 @@
             renderLedStatus();
         }
         // 自動刷新數據
+        function renderRfidHistory(rfid) {
+            const historyElement = document.getElementById('rfidHistory');
+            const recentReads = Array.isArray(rfid?.recent_reads)
+                ? rfid.recent_reads.slice(-5)
+                : [];
+            historyElement.textContent = recentReads.length
+                ? recentReads.map(read => read.uid + '：' + read.read_at).join('\n')
+                : '尚未讀卡';
+        }
+        function renderMotionHistory(motion) {
+            const historyElement = document.getElementById('motionHistory');
+            const detections = Array.isArray(motion?.recent_detections)
+                ? motion.recent_detections.slice(-5)
+                : [];
+            historyElement.textContent = detections.length
+                ? detections.map((time, index) => '移動' + (index + 1) + '：' + time).join('\n')
+                : '最近 5 次：尚未偵測';
+        }
+
+        function renderMotionStatus(motion) {
+            const sensorReady = motion.sensor_status === 'ready';
+            document.getElementById('motionMessage').textContent = sensorReady
+                ? (motion.detected ? '偵測到移動物' : '等待移動')
+                : (motion.sensor_status === 'error' ? 'PIR 讀取異常' : 'PIR 尚未就緒');
+            document.getElementById('motionMessage').style.color =
+                sensorReady && motion.detected ? '#b42318' : '#333';
+            renderMotionHistory(motion);
+            document.getElementById('motionCount').textContent = motion.count ?? 0;
+            const musicLabels = {starting: '初始化中', idle: '等待移動', playing: '播放中',
+                completed: '播放完成', error: '播放失敗', unavailable: '未初始化', stopped: '已停止'};
+            document.getElementById('musicStatus').textContent = musicLabels[motion.music_status] || '未知';
+            document.getElementById('motionError').textContent =
+                [motion.sensor_error, motion.music_error].filter(Boolean).join('；');
+        }
+
+
         async function updateData() {
             if (sensorUpdatePending) return;
             sensorUpdatePending = true;
@@ -539,7 +668,7 @@
                 const response = await fetch('/api/data', {cache: 'no-store'});
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const data = await response.json();
-                connectionSucceeded();
+                updateLightThresholds(data.light_thresholds);
                 renderLedStatus();
                 // LED state has its own fast channel; never apply this older copy.
                 
@@ -565,22 +694,10 @@
                     init_error: '初始化失敗',
                     read_error: '讀卡異常，持續重試'
                 };
-                document.getElementById('rfidUid').textContent = rfid.last_uid ?? '尚未讀卡';
-                document.getElementById('rfidReadAt').textContent = rfid.last_read_at ?? '--';
+                renderRfidHistory(rfid);
                 document.getElementById('rfidStatus').textContent = rfidLabels[rfid.status] || '未知';
                 document.getElementById('rfidError').textContent = rfid.error ?? '';
-                const motion = data.motion || {};
-                const sensorReady = motion.sensor_status === 'ready';
-                document.getElementById('motionMessage').textContent = sensorReady
-                    ? (motion.detected ? '偵測到移動物' : '等待移動')
-                    : (motion.sensor_status === 'error' ? 'PIR 讀取異常' : 'PIR 尚未就緒');
-                document.getElementById('motionMessage').style.color = sensorReady && motion.detected ? '#b42318' : '#333';
-                document.getElementById('motionTime').textContent = motion.last_detected_at ?? '--';
-                document.getElementById('motionCount').textContent = motion.count ?? 0;
-                const musicLabels = {starting: '初始化中', idle: '等待移動', playing: '播放中',
-                    completed: '播放完成', error: '播放失敗', unavailable: '未初始化', stopped: '已停止'};
-                document.getElementById('musicStatus').textContent = musicLabels[motion.music_status] || '未知';
-                document.getElementById('motionError').textContent = [motion.sensor_error, motion.music_error].filter(Boolean).join('；');
+                renderMotionStatus(data.motion || {});
                 document.getElementById('status').textContent = '🟢 正常';
                 
             } catch (error) {
@@ -652,6 +769,7 @@
         // Each channel schedules its next request only after the previous one ends.
         monitorLedFreshness();
         pollSensorData();
+        pollMotionStatus();
         pollLedStatus();
     </script>
 </body>

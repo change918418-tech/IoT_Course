@@ -1,6 +1,6 @@
 # 物聯網軟體架構講義：Web 畫面、按鈕與資料生命週期
 
-**適用案例：**本專案目前的 ESP32／MicroPython、Microdot、HTML／CSS／JavaScript、uPlot 本機資產與 MQTT 實作。**整理日期：**2026-10-05。這是獨立講義，不是變更紀錄；若程式行為改變，應同步修正文中的對應說明。
+**適用案例：**本專案目前的 ESP32／MicroPython、Microdot、HTML／CSS／JavaScript、uPlot 本機資產與 MQTT 實作。**整理日期：**2026-10-11 23:23:20 +08:00。這是獨立講義，不是變更紀錄；若程式行為改變，應同步修正文中的對應說明。
 
 本講義依目前程式逐步追蹤。圖中成功情境不代表已做實機驗證；現有缺陷另列在各節，避免把預期設計當成已實現功能。行號以整理當時為準，之後可依函式名稱查詢。
 
@@ -16,13 +16,14 @@
 | 狀態區的濕度 | `humidity`，第 199 行 | 同上 | `data.humidity` |
 | 濕度卡片 | `humidityCard`，第 215 行 | 同上 | 同一個 `data.humidity` |
 | 光照目前值 | `lightCard`，第 220 行 | 同上 | `data.light`，原始 ADC 值 |
-| 光照歷史圖 | `lightChart`，uPlot Canvas | `updateLightChart()` | 最近 20 次有效 ADC；一般 Y 軸 0～2048，超過 2048 時擴展至 4095 |
+| 光照歷史圖 | `lightChart`，uPlot Canvas | `updateLightChart()` | 最近 80 次有效 ADC；一般 Y 軸 0～2048，超過 2048 時擴展至 4095 |
 | 狀態文字 | `status`，第 203 行 | 初始 HTML／資料更新例外 | 初始為正常；catch 時改為連接失敗 |
+| 移動偵測與喇叭狀態 | `motionMessage`、`motionHistory`、`motionCount`、`musicStatus` | `updateMotionStatus()` | `GET /api/motion/status`，只讀PIR／喇叭RAM快照，不等待DHT、ADC或SPI |
 | 按鈕 1：切換 LED | 第 226 行，`onclick="toggleLED()"` | 使用者 click | `POST /api/led/toggle`，循環下一個色碼 |
 | 按鈕 2：發布資料 | 第 227 行，`onclick="publishData()"` | 使用者 click | `POST /api/publish`，設定發佈事件 |
 | 發佈成功／失敗視窗 | JavaScript `alert()` | 發佈按鈕處理 | 依 HTTP 結果或 fetch 例外，沒有追蹤 MQTT 最終結果 |
 
-畫面目前沒有 LED 色碼欄位或裝置時間欄位；光照卡片使用本機部署的 uPlot 顯示最近 20 次歷史折線。OLED 顯示時間，但它不參與 Web DOM 更新。頁尾「每 1 秒」是固定文字，真正的計時來自 JavaScript 的輪詢排程。
+畫面目前沒有 LED 色碼欄位或裝置時間欄位；光照卡片使用本機部署的 uPlot 顯示最近 80 次歷史折線。OLED 顯示時間，但它不參與 Web DOM 更新。頁尾「每 1 秒」是固定文字，真正的計時來自 JavaScript 的輪詢排程。
 
 ## 2. 先分清楚兩個執行世界
 
@@ -172,6 +173,163 @@ sequenceDiagram
 
 頁面另外請求兩個本機資產：`/assets/uplot/1.6.32/uPlot.iife.min.js` 與 `/assets/uplot/1.6.32/uPlot.min.css`。`web_server.py` 使用固定路由與 `Response.send_file()` 串流回應，不把函式庫併入 `HTML_PAGE`；兩個資產使用長效快取，因此更新函式庫版本時必須同步修改 URL 版本目錄、路由與部署檔案。
 
+### 4.1 uPlot 如何整合進 `index.html` 與 `web_server.py`
+
+本專案採「HTML 頁面與圖表函式庫分離部署」：`index.html` 只保留頁面結構、樣式與應用程式 JavaScript；uPlot 的 JavaScript／CSS 以固定版本檔案放在 `assets/`，再由 `web_server.py` 提供同源 HTTP 路由。這樣不需要 CDN、ESP32 不必在執行時連外下載函式庫，也不會把約 51 KB 的壓縮 JavaScript 複製進 `HTML_PAGE` 字串。
+
+#### A. `index.html` 的載入順序
+
+`index.html` 有兩個 uPlot 入口：
+
+```html
+<head>
+    <link rel="stylesheet" href="/assets/uplot/1.6.32/uPlot.min.css">
+</head>
+...
+<body>
+    ...
+    <script src="/assets/uplot/1.6.32/uPlot.iife.min.js"></script>
+    <script>
+        // 本頁應用程式 JavaScript
+    </script>
+</body>
+```
+
+瀏覽器處理順序如下：
+
+1. 先向 ESP32 的 `/` 或 `/index.html` 取得整份 HTML。
+2. 解析 `<link>` 時，再向同一個 ESP32 請求 `uPlot.min.css`；這個檔案提供 `.uplot`、Canvas 外框與內部元素的基本樣式。
+3. 解析到 body 底部的 `<script src=...>` 時，請求並執行 `uPlot.iife.min.js`。IIFE 版本會在瀏覽器建立全域 `uPlot` 建構函式。
+4. uPlot 載入完成後，才執行下一個 inline script；該 script 才能在 `createLightChart()` 中呼叫 `new uPlot(...)`。
+5. 頁面啟動 `updateData()`，之後以既有輪詢流程取得 `/api/data`。
+
+因此，uPlot 檔案不能只存在開發電腦，也不能只修改 HTML 的 `<script>` 路徑；ESP32 檔案系統與 `web_server.py` 路由必須同時存在。若 JavaScript 資產遺失、路徑拼錯或函式庫未成功執行，`typeof uPlot !== 'function'`，`createLightChart()` 會回傳失敗，畫面顯示「圖表元件載入失敗」；感測文字仍可能更新，因為文字資料與圖表初始化是兩條前端流程。
+
+#### B. 光照資料如何進入 uPlot
+
+光照圖不是由 ESP32 產生圖片，也不是由 `/api/data` 回傳 SVG。ESP32 只回傳數字，瀏覽器保留短期歷史並交給 uPlot 繪製：
+
+```text
+GET /api/data
+  → response.json().light
+  → updateLightChart(value)
+  → lightHistory（瀏覽器 RAM，最多80筆）
+  → getLightChartData()
+  → uPlot.setData()
+  → Canvas 折線
+```
+
+`updateLightChart(value)` 的資料邊界是：
+
+| 步驟 | 實作 | 目的 |
+|---|---|---|
+| 數字化 | `Number(value)`，非有限值直接不新增樣本 | 避免 `null`、文字或 `NaN` 污染圖表 |
+| ADC 限制 | `Math.max(0, Math.min(4095, numeric))` | 將前端顯示限制在 ADC 合理範圍 |
+| 加入歷史 | `lightHistory.push(...)` | 保存本頁瀏覽期間的有效樣本 |
+| 滑動視窗 | 超過 `LIGHT_HISTORY_LIMIT = 80` 時 `shift()` | 限制瀏覽器 RAM 與 Canvas 資料量 |
+| 組合 uPlot 資料 | X 軸為 `0...n-1`，Y 軸為歷史 ADC 複本 | 符合 uPlot 的 `[xValues, yValues]` 格式 |
+
+歷史只存在瀏覽器 RAM；重新整理、關閉頁面或重新開啟另一個分頁都會重新從空陣列開始，不寫入 ESP32 Flash，也不改變 `/api/data` 契約。
+
+#### C. uPlot 圖表設定與兩個 Y／X 軸邊界
+
+`createLightChart()` 只建立一次 `lightChart`。建立時設定 Canvas 寬度、280 px 高度、光照序列顏色、隱藏點標記、隱藏 legend／cursor，以及 Y 軸刻度與水平虛線。資料更新時不重建 DOM，而是呼叫 `setData()` 和 `setScale()`：
+
+```javascript
+const chartData = getLightChartData();
+lightChart.setData(chartData, false);
+lightChart.setScale('x', {
+    min: 0,
+    max: Math.max(1, chartData[0].length - 1)
+});
+lightChart.setScale('y', {
+    min: 0,
+    max: getLightChartMax()
+});
+```
+
+X 軸使用 `auto: false` 與 identity `range` 函式，再由 `renderLightChart()` 明確設定目前的 `0～n-1`。這個細節很重要：若只使用 `setData(..., false)` 而讓 X 軸停留在初始 `0～1`，新增資料會落在可視區域外，畫面看起來就像只連了前兩個點。資料超過 80 筆後，陣列移除最舊值，X 軸仍維持 `0～79`，因此畫面是最近 80 筆的滑動視窗。
+
+Y 軸則故意不採資料自動縮放：
+
+- 所有歷史值都不大於 2048：範圍固定為 `0～2048`，刻度為 `0、512、1024、1536、2048`。
+- 任一歷史值大於 2048：範圍擴展為 `0～4095`，刻度為 `0、1024、2048、3072、4095`。
+- 新樣本若超過 4095，先限制到 4095；因此不會破壞圖表比例。
+
+`setScale('y')` 的明確範圍與 `getLightAxisSplits()` 的刻度函式分工不同：前者決定可視數值上下限，後者決定水平網格線與文字刻度位置。這就是「常態聚焦 2048 以下，但高值出現時仍看得到完整 ADC 範圍」的實作。
+
+#### C.1 亮暗遲滯線
+
+圖表另外使用 uPlot 的 `hooks.draw` 在 Canvas 上畫兩條紅色實線；門檻不是前端自行決定，而是由同一輪 `/api/data` 的 `light_thresholds` 傳入：
+
+| 圖線 | API 欄位 | 目前裝置／範例值 | 控制意義 |
+|---|---|---:|---|
+| `暗 <trigger>` | `data.light_thresholds.trigger` | 裝置 `config.py`：500；公開範例：1000 | ADC 嚴格低於 trigger 時，允許提交一次低光 LED 警示。 |
+| `亮 <reset>` | `data.light_thresholds.reset` | 目前裝置與公開範例：1100 | ADC 回升至 reset 以上時，重新 armed，允許下一次低光警示。 |
+
+前端收到門檻後，`updateLightThresholds()` 保存數字；`drawLightThresholds()` 使用 `chart.valToPos(value, 'y', true)` 把 API 值轉為目前 Y 軸的 Canvas 座標，再畫完整寬度的紅色實線，並在右側動態標示實際數字。當 Y 軸切換到 4095 時，兩條線仍依 API 回傳的 ADC 值重新定位，不會跟著資料平均或移動。若初次回應尚未包含有效門檻，圖表不繪製門檻線；後續成功回應取得門檻後才顯示，既有門檻則在暫時缺欄位時保留。
+
+因此亮暗緩衝區不是固定寫死的 `1000～1099`；目前裝置設定為 `500～1099`，公開設定範例則為 `1000～1099`。圖線只提供操作邊界的視覺提示，不會取代後端 LED owner 的低光遲滯判斷。
+
+#### D. 更新與縮放生命週期
+
+1. `updateData()` 成功解析 JSON 後，先執行 `updateLightThresholds(data.light_thresholds)`，再更新溫度、濕度、光照目前值與 `updateLightChart(data.light)`。
+2. 第一次有效光照值會建立 uPlot；等待資料時顯示 `lightChartEmpty`。
+3. 後續值使用 `setData()` 更新既有圖表，避免每秒重新建立 Canvas。
+4. `window.resize` 事件呼叫 `resizeLightChart()`，依容器寬度執行 `setSize()`；不重新建立 uPlot，也不清除歷史資料。
+5. uPlot 載入失敗時只停用圖表，不會把感測文字輪詢或 LED／RFID／移動偵測流程改成依賴圖表。
+
+#### E. `web_server.py` 如何提供 uPlot 檔案
+
+`web_server.py` 的 `load_html()` 只讀取根目錄 `index.html` 到 `HTML_PAGE`；uPlot 資產不在啟動時讀成 Python 字串。兩個固定路由使用 Microdot 的 `Response.send_file()`：
+
+```python
+@app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')
+async def uplot_javascript(request):
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.iife.min.js',
+        content_type='application/javascript; charset=utf-8',
+        max_age=31536000)
+
+@app.route('/assets/uplot/1.6.32/uPlot.min.css')
+async def uplot_stylesheet(request):
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.min.css',
+        content_type='text/css; charset=utf-8',
+        max_age=31536000)
+```
+
+這裡有四個設計重點：
+
+1. **同源路徑：**HTML 使用相對根路徑，瀏覽器與 `/api/data` 使用同一個 ESP32 origin，不需要 CORS 或外部網路。
+2. **串流檔案：**`send_file()` 直接從檔案回應資產，不把壓縮 JavaScript／CSS 併入 `HTML_PAGE`；這降低 HTML 複製與啟動時的額外記憶體壓力。
+3. **正確 MIME type：**JavaScript 回 `application/javascript; charset=utf-8`，CSS 回 `text/css; charset=utf-8`，瀏覽器才會依資產用途解析。
+4. **長效快取與版本路徑：**`max_age=31536000` 允許瀏覽器長期快取；升級 uPlot 必須建立新的 `assets/uplot/<版本>/`、修改 HTML URL、增加對應路由並同步上傳，不能在相同 URL 直接替換內容後期待所有瀏覽器立即取得新檔。
+
+#### F. ESP32 部署檢查表與故障定位
+
+最小檔案集合如下：
+
+```text
+index.html
+web_server.py
+assets/uplot/1.6.32/uPlot.iife.min.js
+assets/uplot/1.6.32/uPlot.min.css
+assets/uplot/1.6.32/LICENSE
+```
+
+瀏覽器開發者工具可依下表定位問題：
+
+| 現象 | 優先檢查 |
+|---|---|
+| 頁面完全不是新版本 | ESP32 的 `HTML_PAGE` 是否因未重啟仍保留舊內容；瀏覽器是否需要強制重新整理 |
+| 感測文字正常、圖表顯示「圖表元件載入失敗」 | uPlot JavaScript 路由、檔案路徑、檔案是否真的上傳；Network 是否取得 HTTP 200 |
+| 圖表有框但樣式異常 | `uPlot.min.css` 路由與 MIME type；瀏覽器是否被舊快取污染 |
+| 圖表只顯示兩點 | 確認使用目前 `renderLightChart()` 的 X 軸明確 `setScale()` 邏輯，而不是只呼叫 `setData(..., false)` |
+| 圖表超過 2048 被截斷 | 確認 Y 軸歷史資料有使用 `getLightChartMax()` 切換至 4095，且前端未錯誤固定在 2048 |
+
+這個整合的責任邊界是：`web_server.py` 負責把 HTML／uPlot 靜態資產與 JSON API 送到瀏覽器；`index.html` 負責保存光照短期歷史、決定刻度與呼叫 uPlot；uPlot 只負責在瀏覽器 Canvas 中繪圖，不讀 GPIO、不直接呼叫 MicroPython，也不保存裝置端歷史。
+
 `request` 在目前這些 handler 中沒有被讀取；URL 路由負責選函式。`0.0.0.0` 是伺服器綁定所有 IPv4 介面的地址，不是學生應在瀏覽器輸入的目的 IP；實際目的 IP 由 WiFi 取得並印在序列日誌。
 
 **HTML 的生命週期：**Flash 原始檔不因請求結束而刪除。RAM 中 `HTML_PAGE` 保持存在直到重新指定或程式／裝置重啟。上傳新 HTML 並不保證既有 RAM 快取或已開啟頁面會自動更新；目前沒有重新載入 API，通常需要重啟裝置並重新載入頁面。
@@ -244,9 +402,49 @@ sequenceDiagram
 成功回應範例（假設當次數值）：
 
 ```json
-{"temp":26,"humidity":60,"light":950,"status":"ok"}
+{"temp":26,"humidity":60,"light":950,"light_thresholds":{"trigger":500,"reset":1100},"status":"ok"}
+```
+其中`light_thresholds`由`web_server.py`讀取`config.LIGHT_ALERT_TRIGGER_ADC`與`config.LIGHT_ALERT_RESET_ADC`後序列化；前端不得直接讀取Python設定檔。
+
+### 5.1 LED、RFID、移動偵測的最近紀錄
+
+同一份`/api/data`也帶回控制與輸入的RAM快照；`/api/led/status`則提供LED的快速、不快取版本。這些歷史不是資料庫，裝置重啟後會清空：
+
+為避免完整`/api/data`讀取DHT／ADC等慢感測時延遲移動提示，`index.html`另以`MOTION_POLL_MS = 1000`獨立輪詢`GET /api/motion/status`。此路由只複製`motion_state`的RAM快照，設定`Cache-Control: no-store`；前端每一通道一次只保留一筆在途請求，完成後才排下一筆。
+
+| API欄位 | 內容 | 上限與畫面用途 |
+|---|---|---|
+| `led.alert_flash_count` | 已完成的低光警示事件次數 | 每完成一組`LIGHT_ALERT_BLINK_COUNT`次閃紅才加1；警示尚未完整閃完時不增加。 |
+| `led.alert_flash_total` | 一個警示事件內的閃紅次數 | 來源為`config.LIGHT_ALERT_BLINK_COUNT`，目前通常為5；不是事件次數。 |
+| `led.alert_flash_log` | 每個已完成事件的`{"sequence": 1, "time": "YYYY-MM-DD HH:MM:SS"}`紀錄 | 裝置RAM保留最近5個事件；時間是整組閃紅完成時間，LED區以`閃紅序號：時間`逐行顯示。 |
+| `rfid.recent_reads` | `{"uid": "...", "read_at": "YYYY-MM-DD HH:MM:SS"}`格式的成功讀卡紀錄 | 只保留最近5次；RFID卡區顯示`卡號：讀卡時間`。 |
+| `motion.recent_detections` | PIR經非同步防抖後的有效移動時間字串 | 以`PIR_HIGH_DEBOUNCE_MS`確認穩定高電位、以`PIR_LOW_REARM_MS`確認穩定低電位；只保留最近5次，移動偵測卡區逐行顯示`移動序號：時間`。 |
+
+目前設定為`PIR_POLL_INTERVAL_MS = 100` ms、`PIR_HIGH_DEBOUNCE_MS = 200` ms、`PIR_LOW_REARM_MS = 1500` ms。一次偵測觸發後，持續高電位或短暫低／高抖動不會重複計數；只有低電位穩定達重新武裝時間後，下一次穩定高電位才會形成新事件。`MOTION_DETECTED_HOLD_MS = 5000`只控制網頁`detected`顯示保持時間，不是事件去重時間。1500 ms是目前在避免同一次手部靠近重複觸發與縮短再次偵測等待之間的折衷值。
+
+例如回應中的相關部分可為：
+
+```json
+{
+  "led": {
+    "alert_flash_count": 1,
+    "alert_flash_total": 5,
+    "alert_flash_log": [
+      {"sequence": 1, "time": "2026-10-12 12:00:05"}
+    ]
+  },
+  "rfid": {
+    "recent_reads": [
+      {"uid": "0102030404", "read_at": "2026-10-12 12:00:02"}
+    ]
+  },
+  "motion": {
+    "recent_detections": ["2026-10-12 12:00:03"]
+  }
+}
 ```
 
+`index.html`不自行累積這三類事件；LED以`/api/led/status`、RFID以`/api/data`、移動／喇叭以`/api/motion/status`成功快照重繪`ledFlashHistory`、`rfidHistory`與`motionHistory`。因此前端顯示的5筆上限與裝置端RAM上限一致，也不會因瀏覽器重新整理而保留舊資料。
 前端 `index.html:238` 的核心程式：
 
 ```javascript
@@ -290,7 +488,7 @@ flowchart TB
     Return --> JSON[API 的 light 欄位]
     JSON --> JS[updateData 的 data.light]
     JS --> DOM[lightCard.textContent]
-    JS --> History[updateLightChart，保留最近20筆]
+    JS --> History[updateLightChart，保留最近80筆]
     History --> Chart[uPlot Canvas]
     Chart --> Axis[Y軸一般0～2048；高值時4095]
 ```
@@ -301,7 +499,7 @@ flowchart TB
 
 網頁顯示的是 raw ADC，不是 lux。此專案以 0～4095 解讀 ADC；實際量測範圍與校正須依板型／韌體確認。uPlot 圖表通常將 Y 軸固定在 0～2048，歷史資料出現大於 2048 的值時擴展至 4095；超出 ADC 邊界的前端資料會限制到圖表邊界。`get_brightness_percent()` 未被 Web 呼叫，沒有將資料轉成百分比。
 
-圖表只在瀏覽器 RAM 保存最近 20 筆資料，重新整理頁面後清空；它不寫入 ESP32 Flash，也不改變 `/api/data` 的資料契約。
+圖表只在瀏覽器 RAM 保存最近 80 筆資料，重新整理頁面後清空；它不寫入 ESP32 Flash，也不改變 `/api/data` 的資料契約。
 
 `LIGHT_AUTO_CONTROL_ENABLED=False` 時，背景任務仍讀 ADC，只是不依亮度修改 LED。所以「停止自動照明」不會讓網頁光照欄位停止更新。
 
