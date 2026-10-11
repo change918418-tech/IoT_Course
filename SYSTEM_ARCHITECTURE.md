@@ -68,7 +68,7 @@ flowchart LR
 | 應用協調 | `tasks.py` | 按鈕、DHT、光感、PIR、RFID、OLED、喇叭、MQTT 發佈與訂閱任務。 |
 | 控制服務 | `services/led_service.py` | LED 命令受理、busy 仲裁、有限佇列、警示效果、結果快照與唯一 GPIO owner。 |
 | HTTP 介面 | `web_server.py` | Microdot 路由、HTML 載入、感測資料查詢、LED 命令、MQTT 發佈事件與狀態快照。 |
-| 使用者介面 | `index.html` | 原生 HTML／CSS／JavaScript 儀表板，以 `fetch` 呼叫 REST API。 |
+| 使用者介面 | `index.html`、`assets/uplot/1.6.32/` | HTML／CSS／JavaScript 儀表板；uPlot 本機資產由 Web 路由提供。 |
 | WiFi／時間 | `communication/wifi.py` | 包裝已知 WiFi 連線、NTP 校時與目前時間字串。 |
 | MQTT 轉接器 | `communication/mqtt_client.py` | 包裝 `mqtt_as.MQTTClient`，提供連線、等待、發佈、訂閱與回呼入口。 |
 | 硬體抽象 | `hardware/led.py` | 三個 GPIO 的 3-bit RGB 輸出；只有 `LedService.run()` 應在初始化後寫入。 |
@@ -324,6 +324,8 @@ MFRC522 SPI
 |---|---|---|
 | GET | `/` | 傳回 `index.html`。 |
 | GET | `/index.html` | 傳回 `index.html`。 |
+| GET | `/assets/uplot/1.6.32/uPlot.iife.min.js` | 以 `Response.send_file()` 串流固定版本的 uPlot JavaScript；長效快取。 |
+| GET | `/assets/uplot/1.6.32/uPlot.min.css` | 以 `Response.send_file()` 回傳固定版本的 uPlot CSS；長效快取。 |
 | GET | `/api/data` | 回傳 `temp`、`humidity`、`light`、`status`、RFID、PIR／音樂狀態與 LED snapshot。 |
 | POST | `/api/led/toggle` | 提交 LED `cycle` 命令；接受時回 HTTP 202，busy／queue full／stopped 依原因回 409／429／503。 |
 | GET | `/api/led/status` | 只回傳 LED RAM snapshot；不操作 ADC、DHT、SPI 或 GPIO；設定 `Cache-Control: no-store`。 |
@@ -388,6 +390,11 @@ MFRC522 SPI
 裝置檔案系統 /
 ├── boot.py
 ├── main.py / config.py / tasks.py / web_server.py / index.html
+├── assets/
+│   └── uplot/1.6.32/
+│       ├── uPlot.iife.min.js
+│       ├── uPlot.min.css
+│       └── LICENSE
 ├── hardware/
 ├── communication/
 ├── services/
@@ -402,7 +409,7 @@ MFRC522 SPI
 實機檢核順序：
 
 1. 確認開發板型號、GPIO、ADC、電源、共地與周邊接線。
-2. 上傳後逐一確認必要模組、`index.html`、字型與驅動可以 import／讀取。
+2. 上傳後逐一確認必要模組、`index.html`、`assets/uplot/1.6.32/uPlot.iife.min.js`、`assets/uplot/1.6.32/uPlot.min.css`、字型與驅動可以讀取／import。
 3. 單獨確認 RGB LED、兩個按鈕、DHT11、ADC、PIR、喇叭、OLED 與 RFID。
 4. 確認 WiFi IP、NTP 校時與同網段瀏覽器可連接 HTTP 80。
 5. 確認 `/api/data`、`/api/led/status`、LED 命令與命令結果查詢。

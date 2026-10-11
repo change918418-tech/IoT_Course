@@ -7,7 +7,7 @@ const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 const source = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const elements = {};
 const ids = [...html.matchAll(/id="([^"]+)"/g)].map(m => m[1]);
-ids.forEach(id => elements[id] = { textContent: '', style: {} });
+ids.forEach(id => elements[id] = { textContent: '', style: {}, attributes: {}, clientWidth: 600, setAttribute(name, value) { this.attributes[name] = String(value); } });
 let fail = false;
 let now = 0;
 let rfid = {status: 'ready', last_uid: '0102030404', last_read_at: '2026-10-06 00:30:00', error: null};
@@ -16,7 +16,16 @@ let led = {available: true, alert_active: false};
 let posts = 0;
 let postStatus = 202;
 let commandStatus = 'executed';
+function FakeUPlot(options, data, element) {
+    this.options = options;
+    this.data = data;
+    this.element = element;
+    this.setData = nextData => { this.data = nextData; };
+    this.setScale = () => {};
+    this.setSize = () => {};
+}
 const context = vm.createContext({
+    uPlot: FakeUPlot,
     document: { getElementById(id) { assert.ok(elements[id], `Missing element ${id}`); return elements[id]; } },
     fetch: async (url, options) => {
         if (fail) throw Error('offline');
@@ -38,6 +47,10 @@ const context = vm.createContext({
     await refresh();
     assert.equal(elements.rfidUid.textContent, '0102030404');
     assert.equal(elements.lightCard.textContent, 0);
+    const lightDiagnostics = context.getLightChartDiagnostics();
+    assert.equal(lightDiagnostics.ready, true);
+    assert.ok(lightDiagnostics.sampleCount >= 1);
+    assert.equal(lightDiagnostics.scaleMax, 2048);
     assert.equal(elements.tempCard.textContent, 0);
     assert.equal(elements.ledButton.disabled, false);
     led.alert_active = true;

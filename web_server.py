@@ -135,6 +135,24 @@ async def index_html(request):
     return Response(HTML_PAGE, headers={'Content-Type': 'text/html; charset=utf-8'})
 
 
+@app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')
+async def uplot_javascript(request):
+    """Serve the pinned local uPlot runtime without loading it into HTML_PAGE."""
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.iife.min.js',
+        content_type='application/javascript; charset=utf-8',
+        max_age=31536000)
+
+
+@app.route('/assets/uplot/1.6.32/uPlot.min.css')
+async def uplot_stylesheet(request):
+    """Serve the pinned local uPlot stylesheet."""
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.min.css',
+        content_type='text/css; charset=utf-8',
+        max_age=31536000)
+
+
 @app.route('/api/data')
 async def api_data(request):
     """

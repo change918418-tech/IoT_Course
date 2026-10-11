@@ -105,7 +105,7 @@ git commit -m 'chore(config): stop tracking private device configuration'
 
 ```powershell
 git add -- .gitignore .gitattributes AGENTS.md ChangeLog.md GIT_VERSION_CONTROL.md config.example.py
-git add -- main.py boot.py tasks.py web_server.py index.html hardware communication lib tests SYSTEM_ARCHITECTURE.md IOT_ARCHITECTURE_TECH_TREE.md
+git add -- main.py boot.py tasks.py web_server.py index.html assets hardware communication lib tests SYSTEM_ARCHITECTURE.md IOT_ARCHITECTURE_TECH_TREE.md
 git diff --cached --stat
 git diff --cached --check
 git diff --cached

@@ -16,6 +16,47 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261011-007｜修正uPlot光照折線只顯示前兩點
+
+- **類別：**BUG（光照圖表更新）。
+- **日期／紀錄時間：**2026-10-11 22:53:23 +08:00，工具取得時間。
+- **原因：**使用者回報uPlot折線只顯示前兩點且不再向後延伸。原因是更新資料時保留`setData(..., false)`，但X軸仍使用自動範圍；初始範圍未同步到新增資料，造成後續點落在可視範圍外。
+- **作法：**將uPlot X軸改為明確的非自動範圍，依目前最近20筆資料同步設定`0`至`length - 1`（單點時至少保留`0～1`）；Y軸既有自適應2048／4095邏輯不變。測試替身同步記錄X軸範圍，加入點數增加時X軸上限擴展的回歸檢查。
+- **影響：**光照折線會隨新資料延伸，超過20筆後保留最近20筆並維持可視寬度；不改變感測資料契約或其他卡片。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Python桌面回歸測試20/20通過；`py_compile web_server.py`通過；Chromium以本機uPlot資產及模擬API加入光照樣本後，確認資料長度達20且X軸範圍為0～19，折線會持續向後延伸。未進行ESP32實機上傳與實機瀏覽器驗證。
+- **部署／回復：**部署更新後的`index.html`與`ChangeLog.md`；回復時還原本紀錄前的`index.html`即可。
+
+## CHG-20261011-006｜部署本機uPlot並改用自適應光照圖表
+
+- **類別：**需求變更（網頁圖表與部署資產）。
+- **日期／紀錄時間：**2026-10-11 22:27:21 +08:00，工具取得時間。
+- **原因：**使用者同意以輕量圖表函式庫取代自製SVG光照圖，並要求光照Y軸聚焦在實際常用的2048以下區間；同時必須把函式庫下載並隨ESP32 Web資源部署，不依賴外部CDN。
+- **作法：**固定採用uPlot 1.6.32，從npm官方tarball下載並以npm metadata的SHA-512 integrity驗證通過；部署`assets/uplot/1.6.32/uPlot.iife.min.js`（51081 bytes）、`uPlot.min.css`（1857 bytes）及MIT `LICENSE`。`web_server.py`新增兩個固定資產路由，使用`Response.send_file()`串流與長效快取。`index.html`改以uPlot Canvas繪製最近20筆光照資料；Y軸平時為0～2048並使用0／512／1024／1536／2048刻度，資料出現大於2048時擴展至4095並使用完整刻度，超出ADC邊界的資料限制到0～4095。
+- **同步更新：**`tests/test_led_polling.cjs`、`tests/test_rfid_ui.cjs`加入uPlot測試替身與自適應Y軸範圍驗證；`WEB_UI_EXECUTION_GUIDE.md`、`SYSTEM_ARCHITECTURE.md`與`GIT_VERSION_CONTROL.md`補充本機資產生命週期、路由、ESP32部署結構及資產納入版控的指令。
+- **影響：**新增約51 KB JavaScript與約2 KB CSS的本機Web資產；不改變`/api/data`、LED快速狀態、LED owner、RFID或移動偵測資料契約。資產版本固定於URL路徑，升級函式庫時需同步新增版本目錄、路由與部署檔案。
+- **驗證：**uPlot tarball integrity通過；`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Python桌面回歸測試20/20通過；`py_compile web_server.py`通過；修改後的`WEB_UI_EXECUTION_GUIDE.md`與`SYSTEM_ARCHITECTURE.md`全部13個Mermaid區塊以Mermaid 11.13.0 parser解析通過。Chromium以本機靜態資產及模擬API實際驗證uPlot載入、Canvas建立、0～2048一般刻度、超過2048時4095刻度、折線繪製及窄螢幕布局。未進行ESP32實機上傳、MicroPython資產路由與實機瀏覽器驗證。
+- **部署／回復：**上傳`index.html`、`web_server.py`、`assets/uplot/1.6.32/`、測試與文件；重啟ESP32並強制重新整理瀏覽器。回復時需同步移除uPlot資產路由與資產，或還原本紀錄前的`index.html`與`web_server.py`，避免頁面請求不存在的資產。
+
+## CHG-20261011-005｜放大光照折線圖並補充Y軸刻度
+
+- **類別：**需求變更（網頁介面）。
+- **日期／紀錄時間：**2026-10-11 21:52:05 +08:00，工具取得時間。
+- **原因：**使用者希望光照卡片撐滿整列，並透過Y軸刻度與水平虛線清楚辨識光照數值所在區域及變化。
+- **作法：**`index.html`讓光照卡片跨滿感測卡片區整列；SVG圖表擴大為全列寬度，新增固定0～4095 ADC的Y軸刻度（4095、3072、2048、1024、0）與五條水平虛線；折線改依ESP32 12-bit ADC固定範圍繪製，超出範圍的顯示值限制在圖表邊界內。`tests/test_led_polling.cjs`新增0與4095邊界位置驗證。
+- **影響：**只改變光照網頁呈現與瀏覽器繪圖座標，不改變光照API、警示閾值、LED owner或其他卡片資料。固定Y軸讓不同時間的圖表可直接比較，但低幅度變化可能比自動縮放更不明顯。
+- **驗證：**已執行 `node tests/test_led_polling.cjs`、`node tests/test_rfid_ui.cjs`，兩項均通過；`python -B -m unittest discover -s tests -v` 執行20個測試，20/20通過。以模擬API回應完成Chromium實際檢查：桌面光照卡片跨滿整列、Y軸刻度與水平虛線可見，變化資料可依固定ADC範圍繪製；窄螢幕光照卡片寬度符合單欄布局。未進行ESP32實機驗證。
+- **部署／回復：**部署時更新 `index.html` 與前端測試檔；瀏覽器強制重新整理。可回復本次修改前的 `index.html`、`tests/test_led_polling.cjs` 與本紀錄新增段落。
+
+## CHG-20261011-004｜重新配置網頁儀表板卡片與光照折線圖
+
+- **類別：**需求變更（網頁介面）。
+- **日期／紀錄時間：**2026-10-11 21:39:33 +08:00，工具取得時間。
+- **原因：**使用者要求將光照卡片改為折線顯示，RFID 與移動偵測卡片並列，將 LED 狀態區移到控制按鈕上方，並放大主要文字。
+- **作法：**`index.html`新增不依賴外部套件的 SVG 光照折線圖，保留最近 20 次有效 ADC 讀值並由既有感測輪詢更新；RFID／移動偵測改用雙欄卡片布局，窄螢幕自動改為單欄；LED 狀態與命令提示合併成狀態區並移到按鈕列上方；同步放大卡片、系統狀態、LED 狀態與按鈕文字。`tests/test_led_polling.cjs`及`tests/test_rfid_ui.cjs`補充折線圖更新與空圖提示驗證。
+- **影響：**只改變網頁呈現與瀏覽器內的光照歷史快取，不改變後端 API、LED 權限／busy 檢查、RFID／PIR資料契約或 ESP32 控制流程。光照折線歷史於頁面重新載入後清空。
+- **驗證：**已執行 `node tests/test_led_polling.cjs`、`node tests/test_rfid_ui.cjs`，兩項均通過；`python -B -m unittest discover -s tests -v` 執行 20 個測試，20/20 通過。以本機靜態頁面及模擬 API 回應完成 Chromium 實際布局檢查：桌面 RFID／移動偵測同列、LED 狀態在按鈕上方、光照折線圖可見；窄螢幕兩卡片改為單欄。未進行 ESP32 實機驗證。
+- **部署／回復：**部署時更新 `index.html`，瀏覽器強制重新整理以取得新頁面；可由本次修改前的 `index.html` 與兩個測試檔案回復，後端不需重新上傳。
+
 ## CHG-20261011-003｜補充新增LED效果需求的快速整合方法
 
 - **類別：**需求變更（文件）。

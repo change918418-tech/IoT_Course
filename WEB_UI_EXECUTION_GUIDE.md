@@ -1,6 +1,6 @@
 # 物聯網軟體架構講義：Web 畫面、按鈕與資料生命週期
 
-**適用案例：**本專案目前的 ESP32／MicroPython、Microdot、原生 HTML／JavaScript 與 MQTT 實作。**整理日期：**2026-10-05。這是獨立講義，不是變更紀錄；不修改應用程式或 ChangeLog。
+**適用案例：**本專案目前的 ESP32／MicroPython、Microdot、HTML／CSS／JavaScript、uPlot 本機資產與 MQTT 實作。**整理日期：**2026-10-05。這是獨立講義，不是變更紀錄；若程式行為改變，應同步修正文中的對應說明。
 
 本講義依目前程式逐步追蹤。圖中成功情境不代表已做實機驗證；現有缺陷另列在各節，避免把預期設計當成已實現功能。行號以整理當時為準，之後可依函式名稱查詢。
 
@@ -15,13 +15,14 @@
 | 溫度卡片 | `tempCard`，第 210 行 | 同上 | 同一個 `data.temp`，不是第二次量測 |
 | 狀態區的濕度 | `humidity`，第 199 行 | 同上 | `data.humidity` |
 | 濕度卡片 | `humidityCard`，第 215 行 | 同上 | 同一個 `data.humidity` |
-| 光照卡片 | `lightCard`，第 220 行 | 同上 | `data.light`，原始 ADC 值 |
+| 光照目前值 | `lightCard`，第 220 行 | 同上 | `data.light`，原始 ADC 值 |
+| 光照歷史圖 | `lightChart`，uPlot Canvas | `updateLightChart()` | 最近 20 次有效 ADC；一般 Y 軸 0～2048，超過 2048 時擴展至 4095 |
 | 狀態文字 | `status`，第 203 行 | 初始 HTML／資料更新例外 | 初始為正常；catch 時改為連接失敗 |
 | 按鈕 1：切換 LED | 第 226 行，`onclick="toggleLED()"` | 使用者 click | `POST /api/led/toggle`，循環下一個色碼 |
 | 按鈕 2：發布資料 | 第 227 行，`onclick="publishData()"` | 使用者 click | `POST /api/publish`，設定發佈事件 |
 | 發佈成功／失敗視窗 | JavaScript `alert()` | 發佈按鈕處理 | 依 HTTP 結果或 fetch 例外，沒有追蹤 MQTT 最終結果 |
 
-畫面沒有 LED 色碼欄位、裝置時間欄位或歷史圖。OLED 顯示時間，但它不參與 Web DOM 更新。頁尾「每 1 秒」是固定文字，真正的計時來自 JavaScript 的 `setInterval()`。
+畫面目前沒有 LED 色碼欄位或裝置時間欄位；光照卡片使用本機部署的 uPlot 顯示最近 20 次歷史折線。OLED 顯示時間，但它不參與 Web DOM 更新。頁尾「每 1 秒」是固定文字，真正的計時來自 JavaScript 的輪詢排程。
 
 ## 2. 先分清楚兩個執行世界
 
@@ -169,6 +170,8 @@ sequenceDiagram
 | 瀏覽器解析 | HTML→DOM，CSS→樣式 | 建立 Browser 記憶體中的元素及初始 `--`／正常文字 |
 | 程式啟動 | `updateData(); setInterval(updateData, 1000);` | script 在 body 後端，前面的顯示節點已建立 |
 
+頁面另外請求兩個本機資產：`/assets/uplot/1.6.32/uPlot.iife.min.js` 與 `/assets/uplot/1.6.32/uPlot.min.css`。`web_server.py` 使用固定路由與 `Response.send_file()` 串流回應，不把函式庫併入 `HTML_PAGE`；兩個資產使用長效快取，因此更新函式庫版本時必須同步修改 URL 版本目錄、路由與部署檔案。
+
 `request` 在目前這些 handler 中沒有被讀取；URL 路由負責選函式。`0.0.0.0` 是伺服器綁定所有 IPv4 介面的地址，不是學生應在瀏覽器輸入的目的 IP；實際目的 IP 由 WiFi 取得並印在序列日誌。
 
 **HTML 的生命週期：**Flash 原始檔不因請求結束而刪除。RAM 中 `HTML_PAGE` 保持存在直到重新指定或程式／裝置重啟。上傳新 HTML 並不保證既有 RAM 快取或已開啟頁面會自動更新；目前沒有重新載入 API，通常需要重啟裝置並重新載入頁面。
@@ -287,13 +290,18 @@ flowchart TB
     Return --> JSON[API 的 light 欄位]
     JSON --> JS[updateData 的 data.light]
     JS --> DOM[lightCard.textContent]
+    JS --> History[updateLightChart，保留最近20筆]
+    History --> Chart[uPlot Canvas]
+    Chart --> Axis[Y軸一般0～2048；高值時4095]
 ```
 
 目前 `LightSensor` 有 `read()`，因此 `get_current_light()` 的其他分支不會走到。真實參數是初始化時的 `Pin(8)` 與 `ADC.ATTN_11DB`；每次 `read()` 不再傳 Pin，ADC 物件已保留初始化設定。
 
 成功時 `self.current_value` 被新 ADC 整數取代；ADC 讀取失敗時 `LightSensor.read()` 捕捉例外並回傳先前值，沒有附帶「這次其實讀取失敗」的訊號。Web helper 若沒有可用感測物件或自身失敗，則可能回傳 0。
 
-網頁顯示的是 raw ADC，不是 lux。此專案以 0～4095 解讀 ADC；實際量測範圍與校正須依板型／韌體確認。`get_brightness_percent()` 未被 Web 呼叫，沒有將資料轉成百分比。
+網頁顯示的是 raw ADC，不是 lux。此專案以 0～4095 解讀 ADC；實際量測範圍與校正須依板型／韌體確認。uPlot 圖表通常將 Y 軸固定在 0～2048，歷史資料出現大於 2048 的值時擴展至 4095；超出 ADC 邊界的前端資料會限制到圖表邊界。`get_brightness_percent()` 未被 Web 呼叫，沒有將資料轉成百分比。
+
+圖表只在瀏覽器 RAM 保存最近 20 筆資料，重新整理頁面後清空；它不寫入 ESP32 Flash，也不改變 `/api/data` 的資料契約。
 
 `LIGHT_AUTO_CONTROL_ENABLED=False` 時，背景任務仍讀 ADC，只是不依亮度修改 LED。所以「停止自動照明」不會讓網頁光照欄位停止更新。
 
@@ -584,13 +592,25 @@ RAM 回收由 runtime／GC 決定，無參照不等於立即擦除記憶體。�
 
 `textContent` 寫的是文字，不將回傳值當 HTML 標籤解析；本案例更新現有 DOM，沒有重新取得整頁。[DOM textContent](https://developer.mozilla.org/en-US/docs/Web/API/Node/textContent)
 
+### uPlot 本機資產部署
+
+更新網頁圖表時，必須與 `index.html`、`web_server.py` 同步上傳：
+
+```text
+assets/uplot/1.6.32/uPlot.iife.min.js
+assets/uplot/1.6.32/uPlot.min.css
+assets/uplot/1.6.32/LICENSE
+```
+
+瀏覽器會從 ESP32 的固定 `/assets/uplot/1.6.32/` 路徑讀取資產，不使用 CDN。若只上傳 `index.html` 而漏掉資產，頁面仍可能顯示感測文字，但光照圖會顯示「圖表元件載入失敗」。更新版本時使用新的版本目錄與路由，避免長效快取繼續使用舊檔案。
+
 ## 13. 上課操作與討論題
 
 ### 實驗 A：觀察顯示資料流
 
 1. 確認板上程式啟動、取得 WiFi IP，再由同網段 Browser 開 `/`。
 2. 開啟開發者工具 Network，過濾 `api/data`，比較每次請求與 Response 正文。
-3. 對照 DOM：同一溫度更新兩個 ID；濕度也相同；光照只更新一個 ID。
+3. 對照 DOM：同一溫度更新兩個 ID；濕度也相同；光照目前值更新 `lightCard`，歷史資料同步更新 `lightChart` 的 uPlot Canvas。
 4. 觀察 DHT 兩秒取樣與一秒查询的差異；改變光線，對照 ADC。實際間隔以觀察結果為準。
 
 ### 實驗 B：觀察 LED 路徑

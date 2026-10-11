@@ -4,13 +4,22 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m => [m[1], {textContent: '', style: {}}]));
+const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m => [m[1], {textContent: '', style: {}, attributes: {}, clientWidth: 600, setAttribute(name, value) { this.attributes[name] = String(value); }}]));
 let now = 0;
 const requests = [];
 const timers = [];
 function deferred() { let resolve; const promise = new Promise(r => resolve = r); return {promise, resolve}; }
+function FakeUPlot(options, data, element) {
+    this.options = options;
+    this.data = data;
+    this.element = element;
+    this.scales = {x: {}, y: {}};
+    this.setData = nextData => { this.data = nextData; };
+    this.setScale = (key, limits) => { this.scales[key] = limits; };
+    this.setSize = size => { this.size = size; };
+}
 const context = vm.createContext({
-    performance: {now: () => now}, AbortController,
+    performance: {now: () => now}, AbortController, uPlot: FakeUPlot,
     document: {getElementById: id => elements[id]},
     fetch(url, options) {
         const gate = deferred();
@@ -67,6 +76,18 @@ const response = value => ({ok: true, json: async () => value});
     const healthySensor = context.updateData();
     requests.filter(r => r.url === '/api/data').at(-1).gate.resolve(response({light: 123, led: {available:true, alert_active:false}}));
     await healthySensor;
+    const initialLight = context.getLightChartDiagnostics();
+    assert.equal(initialLight.ready, true);
+    assert.equal(initialLight.sampleCount, 1);
+    assert.equal(initialLight.scaleMax, 2048);
+    assert.equal(initialLight.xMax, 1);
+    context.updateLightChart(4095);
+    context.updateLightChart(0);
+    const expandedLight = context.getLightChartDiagnostics();
+    assert.equal(expandedLight.ready, true);
+    assert.equal(expandedLight.sampleCount, 3);
+    assert.equal(expandedLight.scaleMax, 4095);
+    assert.equal(expandedLight.xMax, 2);
     assert.equal(elements.ledButton.disabled, true);
     assert.match(elements.ledAlertStatus.textContent, /LED 狀態更新異常/);
     now += 5001;
