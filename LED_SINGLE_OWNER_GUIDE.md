@@ -8,7 +8,7 @@
 2. 網頁按鈕要求 LED 換下一個顏色。
 3. 光線太暗時，系統要求 LED 紅色閃爍五次，完成後回到原本狀態。
 
-MQTT 的 `set_color` 在程式中也有命令介面，但目前 MQTT callback 尚未接通；它不是本次三個主要需求的實機驗證證據。
+MQTT 的 `set_color` 現在也經由 `MqttManager` 的同步 callback bridge 送入 `CommandService`，再交給同一個 `LedController`；本文件只記錄桌面 fake MQTT／fake GPIO 已驗證的 adapter 路徑，未宣稱真 Broker 與 ESP32 實機端到端通過。
 
 ## 閱讀路線：先用生活比喻，再看案例與程式
 
@@ -83,10 +83,10 @@ MQTT 的 `set_color` 在程式中也有命令介面，但目前 MQTT callback �
 新的機制像學校辦公室：
 
 1. 按鈕、網頁、光感測器都不能直接碰燈。
-2. 它們把要求交給同一個受理窗口：`LedService.submit()`。
+2. 它們把要求交給同一個受理窗口：`CommandService.submit()`。
 3. 受理窗口判斷「現在能不能接」，並發一張收據 `receipt`。
 4. 普通換色要求放進有限的待辦清單 `queue`。
-5. 只有一位 LED 工作員 `LedService.run()` 依序處理待辦單。
+5. 只有一位 LED 工作員 `LedController.run()` 依序處理待辦單。
 6. 工作員最後才使用工具 `RgbLed.write()` 寫入 GPIO。
 
 紅閃有一條特別規則：
@@ -141,7 +141,7 @@ flowchart TD
 
 **比喻：**三個人可以報告問題，但教室只有一支粉筆；不能讓三個人同時寫黑板。
 
-**程式：**`LedService.run()` 是唯一 LED owner。按鈕、光感、Web 只呼叫 `submit()`，不直接呼叫 `RgbLed.write()`。
+**程式：**`LedController.run()` 是唯一 LED owner。按鈕、光感、Web、MQTT 只透過 `CommandService.submit()` 提交命令，不直接呼叫 `RgbLed.write()`。
 
 **解決什麼：**避免不同任務各自以為自己是最後一個操作者，造成紅閃、恢復、換色互相覆蓋。
 
@@ -149,7 +149,7 @@ flowchart TD
 
 **比喻：**所有人先到辦公室登記，不可以自己跑進器材室開燈。
 
-**程式：**`LedService.submit(kind, source, value)` 同步檢查命令種類、顏色範圍、busy、停止狀態與佇列容量。
+**程式：**`CommandService.submit()` 產生 request ID，交由 `LedController.submit_command()` 同步檢查命令種類、顏色範圍、模式、busy、停止狀態與佇列容量。
 
 **解決什麼：**所有來源使用同一套規則，避免按鈕、Web、光感各自判斷出不同結果。
 
@@ -183,7 +183,7 @@ flowchart TD
 
 **程式：**
 
-- 正常狀態：`_desired_color`、`_desired_on`。
+- 正常狀態：`_desired_color`、`_enabled`。
 - 暫時效果：`_effect`，保存亮滅階段、完成次數與原本狀態。
 - 實際輸出：`RgbLed.write()` 當下寫出的紅色或全滅。
 
@@ -215,7 +215,7 @@ flowchart TD
 
 **比喻：**門鈴被按住，不代表每一毫秒都有人按了一次；而且紅閃中按下的要求不能因為後來紅閃結束就偷偷變成新要求。
 
-**程式：**`Button` 先確認穩定按下；`button1_task` 在 busy 期間記住 `press_rejected`，等待放開後才回到下一次按下。
+**程式：**`Button` 先確認穩定按下；`button1_task` 將要求送入 `CommandService`，busy 時取得拒絕 receipt，等待放開後才回到下一次按下。
 
 **解決什麼：**防止按鈕抖動與「紅閃中按住，紅閃結束後自動補換色」的錯誤。
 
@@ -245,9 +245,9 @@ flowchart TD
 
 所以本階段的目標是**先把問題和目前解法講懂、講一致**。是否存在更簡單、更可靠或更適合未來需求的機制，應在這個共同理解上再比較。
 
-## 0.8 如果多一個需求：按鈕 3 綠閃三次
+## 0.8 未實作提案：如果多一個需求，按鈕 3 綠閃三次
 
-這個例子用來檢查目前架構是否真的容易擴充。新需求是：
+這個例子是尚未實作的架構延伸提案，不是目前裝置功能。它用來檢查 P1 命令邊界是否容易擴充；新需求是：
 
 > **按鈕 3 被按下時，LED 綠色閃爍 3 次，完成後恢復原本狀態。**
 
@@ -263,7 +263,7 @@ flowchart TD
 ```text
 按鈕 1 ─┐
 網頁 ───┤
-光感 ───┼→ 同一個 LedService → 同一個 RGB LED
+光感 ───┼→ 同一個 LedController → 同一個 RGB LED
 按鈕 3 ─┘
 ```
 
@@ -289,7 +289,7 @@ flowchart TD
 LED 正常顯示藍色 1
   → 按鈕 3 穩定按下
   → button3_task 提交 green_flash_alert
-  → LedService 立即設定 busy=true
+  → LedController 立即設定 reserved=true
   → 保存藍色 1 與原本亮滅狀態
   → owner 執行綠色／全滅三次
   → 恢復藍色 1
@@ -310,7 +310,7 @@ LED 正常顯示藍色 1
 按鈕 3 應沿用按鈕 1 的輸入生命週期：
 
 1. `wait_press()` 進行去彈跳。
-2. 以 `reject_if=lambda: led_service.busy` 檢查效果是否進行中。
+2. 以 `reject_if=lambda: controller.busy` 檢查效果是否進行中。
 3. 若已 busy，設定 `press_rejected=true`。
 4. 不提交新的綠閃命令。
 5. 等待按鈕放開。
@@ -322,10 +322,10 @@ LED 正常顯示藍色 1
 
 | 檔案 | 新增或修改內容 | 不需要新增的東西 |
 |---|---|---|
-| `config.example.py` | `BUTTON3_PIN`；必要時增加綠閃次數與時間設定 | 不新增 LED GPIO |
-| `main.py` | 建立 `Button(config.BUTTON3_PIN)`，把它傳給新任務 | 不建立第二個 `LedService` |
-| `tasks.py` | 新增 `button3_task`，只負責去彈跳與提交 `green_flash_alert` | 不直接呼叫 `RgbLed.write()` |
-| `services/led_service.py` | 增加固定效果規格與共同效果處理 | 不新增第二個 owner 或事件迴圈 |
+| `config.example.py` | 提案新增 `BUTTON3_PIN`；必要時增加綠閃次數與時間設定 | 不新增 LED GPIO |
+| `main.py` | 提案建立 `Button(config.BUTTON3_PIN)`，把它傳給新任務 | 不建立第二個 `LedController` |
+| `tasks.py` | 提案新增 `button3_task`，只負責去彈跳與提交 `green_flash_alert` | 不直接呼叫 `RgbLed.write()` |
+| `services/led_controller.py` | 提案增加固定效果規格與共同效果處理 | 不新增第二個 owner 或事件迴圈 |
 | `hardware/led.py` | 不需要修改 RGB 位元輸出 | 不增加第二組硬體控制流程 |
 | `web_server.py` | 若只新增實體按鈕，通常不需要修改；若要顯示綠閃顏色，再擴充 snapshot 欄位 | 不把前端提示當控制權 |
 | `tests/` | 增加綠閃、競爭、恢復與按住按鈕測試 | 不以實機操作取代桌面回歸測試 |
@@ -374,7 +374,7 @@ _EFFECTS = {
 新增按鈕
 → 使用既有 Button 抽象
 → 提交新的效果命令
-→ 交給同一個 LedService
+→ 交給同一個 LedController
 → 使用同一個 busy／reserved 政策
 → 使用同一個狀態機完成與恢復
 ```
@@ -400,12 +400,12 @@ flowchart LR
 | 生活角色 | 程式對應 | 負責 | 不負責 |
 |---|---|---|---|
 | 提出要求的人 | button1_task、Web handler、light_sensor_task | 偵測輸入、提交命令 | 推進色碼或寫GPIO |
-| 受理窗口 | LedService.submit | 判斷是否接單、給ID、預約警示 | 執行閃燈 |
-| 待辦清單 | LedService._queue | 保留待執行命令 | 自己執行或決定政策 |
-| 唯一工作者 | LedService.run→_step→_apply | 改正常狀態、推進警示、渲染 | 讀實體按鈕或ADC |
+| 受理窗口 | CommandService.submit → LedController.submit_command | 判斷是否接單、給ID、預約警示 | 執行閃燈 |
+| 待辦清單 | LedController._queue | 保留待執行命令 | 自己執行或決定政策 |
+| 唯一工作者 | LedController.run→_step→_apply | 改正常狀態、推進警示、渲染 | 讀實體按鈕或ADC |
 | 操作工具 | RgbLed.write | 色碼轉為三個Pin.value | 仲裁、排隊或保存警示 |
 
-**submit和owner不是兩個LedService物件。** main只建立一個LedService，所有來源共用它。submit是同步方法，在哪個來源呼叫，就在該來源task的執行脈絡完成；run是獨立owner task。圖把「受理」與「執行」畫成不同角色，是為了分清工作，不代表兩個服務或額外task。
+**submit和owner不是兩個LedController物件。** `main()`只建立一個`LedController`與一個`CommandService`；所有來源共用CommandService，owner task執行LedController.run。submit是同步方法，在哪個來源task呼叫，就在該來源task的執行脈絡完成；run是獨立owner task。圖把「受理」與「執行」畫成不同角色，是為了分清工作，不代表兩個服務或額外task。
 
 受理方法可以更新佇列、收據與預約旗標；「只有owner改狀態」特指LED正常色碼、效果執行與GPIO，不是禁止受理窗口管理它自己的資料。
 
@@ -416,7 +416,7 @@ flowchart LR
 | 資料 | 回答什麼問題？ | 範例 | 存在哪裡？ |
 |---|---|---|---|
 | 命令 | 想做什麼？ | cycle：前進一色 | _queue裡的tuple |
-| 正常狀態 | 平常應顯示什麼？ | 色碼1、亮燈 | _desired_color、_desired_on |
+| 正常狀態 | 平常應顯示什麼？ | 色碼1、亮燈 | `_desired_color`、`_enabled` |
 | 警示狀態 | 現在暫時做什麼？ | 第2次紅亮 | _effect字典 |
 | 收據receipt | 這筆要求處理到哪裡？ | ID10、accepted | _results，執行時也由queue/effect引用 |
 | 實際輸出 | 此刻GPIO顯示什麼？ | 紅色4或全滅0 | RgbLed與GPIO |
@@ -425,7 +425,7 @@ flowchart LR
 
 ```python
 # 提出要求，還不執行GPIO
-reply = led_service.submit('cycle', 'button1')
+reply = command_service.submit('cycle', 'button1')
 # reply示例：{'id': 10, 'kind': 'cycle', 'source': 'button1',
 #             'status': 'accepted', 'reason': None}
 ```
@@ -450,19 +450,19 @@ flowchart LR
 sequenceDiagram
     participant Main as main
     participant Hardware as RgbLed
-    participant Service as LedService物件
+    participant Controller as LedController物件
     participant Sources as 按鈕光照與Web
     participant Owner as run task
     Main->>Hardware: RgbLed 初始化與安全熄燈
-    Main->>Service: LedService rgb_led
-    Main->>Owner: create_task led_service.run
-    Main->>Sources: 傳入同一led_service物件
-    Owner->>Service: _step ticks_ms
+    Main->>Controller: LedController rgb_led
+    Main->>Owner: create_task led_controller.run
+    Main->>Sources: 傳入同一command_service與controller
+    Owner->>Controller: _step ticks_ms
     Owner->>Hardware: write 7 初始白色
     Owner->>Owner: await sleep_ms 20
 ```
 
-`main()`先await initialize_system取得硬體，再建立服務與owner task；物件裡有空_queue、空_results、reserved=false、desired_color=7、desired_on=true、effect=None。Web透過`web_server.led_service = led_service`取得同一物件；按鈕與光照透過任務參數取得。
+`main()`先await initialize_system取得硬體，再建立`LedController`與`CommandService`並安排owner task；物件裡有空_queue、空_results、reserved=false、desired_color=7、enabled=true、effect=None。Web透過`web_server.command_service = command_service`取得同一個命令入口；按鈕、光照與MQTT透過任務參數取得。
 
 create_task是安排owner執行，不代表當行指令立即寫GPIO。owner取得排程後才首次渲染白色；初始化期間的熄燈由硬體建構函式保障。從此各來源不再直接write。
 
@@ -477,8 +477,8 @@ sequenceDiagram
     participant Entry as submit受理窗口
     participant Owner as owner task
     participant Led as RgbLed與GPIO
-    Button->>Input: await wait_press reject_if
-    Input-->>Button: 穩定按下與press_rejected=false
+    Button->>Input: await wait_press
+    Input-->>Button: 穩定按下
     Button->>Entry: submit cycle, button1
     Entry->>Entry: receipt10加入results與queue
     Entry-->>Button: 副本accepted
@@ -491,11 +491,11 @@ sequenceDiagram
 
 | 步驟 | 哪個程式在執行？ | 呼叫／資料變化 | 是否碰GPIO？ |
 |---|---|---|---|
-| 1 | tasks.button1_task | await button1.wait_press，传reject_if=lambda:led_service.busy | 只讀按鈕GPIO |
-| 2 | hardware.button | 最初按下與去彈跳檢查busy，正常時press_rejected=false | 只讀按鈕GPIO |
+| 1 | tasks.button1_task | await button1.wait_press；按下後提交 `CommandService.submit('cycle', 'button1')` | 只讀按鈕GPIO |
+| 2 | hardware.button | 依 `BUTTON_DEBOUNCE_MS` 穩定判定按下／釋放；不預先取得LED控制權 | 只讀按鈕GPIO |
 | 3 | button1_task→submit | kind='cycle'、source='button1'、value預設None | 不碰LED |
 | 4 | submit | 建receipt10，queue=[cycle10]，回accepted副本 | 不碰LED |
-| 5 | owner.run→_step | pop最早命令，_apply推進1→2，is_on=true | 尚未 |
+| 5 | owner.run→_step | pop最早命令，_apply推進1→2，enabled=true | 尚未 |
 | 6 | owner→RgbLed.write(2) | 2的三個位元為010，寫R=0、G=1、B=0 | 是，唯一owner |
 | 7 | owner | receipt10.status='executed'，queue空 | 無新寫入 |
 
@@ -644,13 +644,13 @@ sequenceDiagram
     participant Owner as owner
     Light->>Entry: 受理警示10
     Entry->>Entry: reserved=true
-    Button->>Button: wait_press讀到busy=true
-    Button->>Button: press_rejected=true
-    Button->>Button: 不submit並等待放開
-    Owner->>Owner: 紅閃五次並恢復藍1
+    Button->>Button: wait_press完成穩定去彈跳
+    Button->>Entry: submit cycle, button1
+    Entry-->>Button: rejected，reason=busy
+    Button->>Button: await wait_release，不排隊
 ```
 
-這條路徑沒有新的按鈕命令ID，因為來源已經消耗該次按下。如果是來源狀態檢查後警示才開始、來源又提交cycle，submit的最終busy檢查仍拒絕，回receipt.status=rejected、reason=busy。兩條拒絕路徑都不寫GPIO，也不排隊。
+這條路徑會產生一筆被拒絕的按鈕 receipt，因為來源在按下後仍會提交 cycle，而共同命令入口的 busy 檢查是最後權威。如果來源先提交、警示才開始，警示也會把尚未執行的普通 receipt 改為 `rejected / alert_started`。兩條拒絕路徑都不寫 GPIO，也不排隊。
 
 **課堂總結：同時到達不一定結果相同，但每個結果都可由受理與執行的先後順序解釋。**
 
@@ -663,11 +663,12 @@ sequenceDiagram
     participant Owner as owner
     participant Input as Button物件
     participant Button as button1_task
+    participant Entry as CommandService
     Owner->>Owner: 第3次紅亮且busy=true
-    Button->>Input: await wait_press reject_if
-    Input->>Input: busy時按下與去彈跳記住拒絕
-    Input-->>Button: press_rejected=true
-    Button->>Button: 不提交cycle
+    Button->>Input: await wait_press
+    Input-->>Button: 穩定按下
+    Button->>Entry: CommandService.submit cycle
+    Entry-->>Button: rejected，reason=busy
     Button->>Input: await wait_release
     Owner->>Owner: 完成第4與第5次並恢復藍1
     Note over Button,Input: 仍按住不產生新命令
@@ -675,10 +676,10 @@ sequenceDiagram
     Button->>Input: 下一輪等待重新按下
 ```
 
-1. `Button.wait_press(reject_if=lambda: led_service.busy)` 在初始低電位及去彈跳中檢查busy，曾遇到忙碌就記住press_rejected=true。
-2. `button1_task`發現press_rejected，不呼叫submit，因此沒有按鈕命令、queue不新增資料、正常色碼不變。
-3. 任務仍await wait_release消耗此次按下。即使一直按到警示結束，也不因busy=false就補提交。
-4. 放開後再次按下，wait_press建立新的press_rejected判斷；若非busy，才提交新的cycle，owner把藍1變綠2。
+1. `button1_task`等待穩定按下後呼叫`CommandService.submit('cycle', 'button1')`；`LedController`在警示預約或執行中會回覆`rejected / busy`。
+2. `button1_task`記錄受理結果並等待放開；被拒絕的按下不建立延後命令，queue不新增資料，正常色碼不變。
+3. 即使按住到警示結束，也不因busy解除而補提交；必須放開後重新按下。
+4. 非忙碌時重新按下，命令才會被CommandService接受，owner之後把藍1變綠2。
 
 | 階段 | 按鈕 | busy | 是否有新cycle | LED |
 |---|---|---|---|---|
@@ -687,7 +688,7 @@ sequenceDiagram
 | 放開 | 釋放 | false | 沒有 | 藍1 |
 | 重新按下 | 新按下 | false | accepted，等待owner | 隨後綠2 |
 
-去彈跳接近結束時警示剛好完成，也不會把旧按下当新操作，因為press_rejected保留了過程中曾忙碌的資訊。這是輸入生命週期政策，不是单靠owner佇列就能自動辦到。
+去彈跳接近結束時警示剛好完成，這次按下仍依 submit 當下的 busy 結果處理，不會因稍後 busy=false 而補提交；放開後必須重新按下。這是輸入生命週期政策，不是單靠 owner 佇列就能自動完成。
 
 ## 8. 把同樣規則套到網頁按鈕
 
@@ -719,7 +720,7 @@ sequenceDiagram
 sequenceDiagram
     participant Browser as 瀏覽器
     participant FastApi as LED狀態API
-    participant Owner as LedService快照
+    participant Owner as LedController快照
     participant DataApi as 感測資料API
     Browser->>DataApi: GET /api/data
     Browser->>FastApi: GET /api/led/status
@@ -732,7 +733,7 @@ sequenceDiagram
     Note over Browser,FastApi: LED請求完成後再等200ms開始下一筆
 ```
 
-- **快速端點：**web_server.api_led_status只呼叫led_service.snapshot，不讀ADC、DHT、RFID或GPIO；回Cache-Control:no-store。/api/data仍含LED副本供相容，但新前端不使用它更新LED。
+- **快速端點：**`web_server.api_led_status`只呼叫`command_service.snapshot()`，不讀ADC、DHT、RFID或GPIO；回`Cache-Control: no-store`。`/api/data`仍含LED副本供相容，但新前端不使用它更新LED。
 - **前端分流：**pollLedStatus→updateLedStatus取得快速快照，完成後等200ms再取；pollSensorData→updateData完成後等1000ms再取，兩個通道分開運作。200ms不是保證反應上限，仍加上HTTP與排程時間。
 - **不重疊：**LED一次只保有一個ledStatusRequest，多個呼叫共用該Promise；感測也有pending檢查。不用setInterval持續新增未完成請求，避免舊感測回應把新的LED提示覆蓋。
 - **逾時：**LED狀態請求1秒未完成就Abort，顯示狀態未知並停用按鈕；Promise.race讓已逾時請求的晚到回應不再渲染。下一筆成功才恢復。沒有把未知當成可操作。
@@ -760,7 +761,7 @@ flowchart TD
     end
     subgraph After[現在：依即時性分流]
         FastPoll[LED回應完成後等200ms] --> FastFetch[GET /api/led/status]
-        FastFetch --> Ram[LedService RAM快照]
+        FastFetch --> Ram[LedController RAM快照]
         Ram --> NewButton[只更新LED提示與按鈕]
         SlowPoll[感測回應完成後等1000ms] --> SlowFetch[GET /api/data]
         SlowFetch --> NewCards[只更新感測卡片]
@@ -786,9 +787,9 @@ flowchart TD
 
 #### 用一次紅閃走過新流程
 
-1. 光照task提交low_light_alert，LedService.submit先設預約旗標；從這一刻起busy成立，新的改色要求會被拒絕。owner之後按既有狀態機輸出紅閃，這次沒有改動此控制流程。
+1. 光照task提交`low_light_alert`，`CommandService.submit()`把警示預約旗標交由`LedController`保存；從這一刻起busy成立，新的改色要求會被拒絕。owner之後按狀態機輸出紅閃。
 2. 瀏覽器pollLedStatus呼叫updateLedStatus。若已有ledStatusRequest，直接共用它，不另開第二筆；否則fetch GET /api/led/status。
-3. web_server.api_led_status呼叫led_service.snapshot()，產生包含alert_active、available等欄位的新字典。JSON是取樣時的副本，沒有轉移GPIO控制權，也沒有改動owner。
+3. `web_server.api_led_status`呼叫`command_service.snapshot()`，產生包含`alert_active`、`available`等欄位的新字典。JSON是取樣時的副本，沒有轉移GPIO控制權，也沒有改動owner。
 4. updateLedStatus取得JSON，showLedStatus以alert_active顯示紅閃提示，並以ledRequestPending、available、alert_active決定disabled。這裡停用的是網頁LED控制按鈕；實體按鈕的拒絕仍由原有後端機制處理。
 5. 同時，較慢的/api/data即使帶著舊led欄位抵達，updateData也只更新感測卡片，因此不能把LED提示改回可操作。
 6. 紅閃結束、原色恢復後，下一份LED快照的alert_active變成false；若沒有在途改色命令且服務可用，畫面恢復可操作。不是由前端自行倒數推測紅閃結束。
@@ -920,7 +921,7 @@ sequenceDiagram
     Light->>Owner: 經submit受理新警示
 ```
 
-圖中最後一箭頭代表要求送到owner的命令入口，不是直接呼叫GPIO。busy歸LedService管理，armed是light_sensor_task局部變數；解除警示不會替光照任務重設armed。警示期間短暫變亮也不算rearm，必須完成後再取樣到1100或以上。
+圖中最後一箭頭代表要求送到owner的命令入口，不是直接呼叫GPIO。busy由`LedController`管理，armed是`light_sensor_task`局部變數；解除警示不會替光照任務重設armed。警示期間短暫變亮也不算rearm，必須完成後再取樣到1100或以上。
 
 ## 10. 課堂演練與自我檢查
 
@@ -947,7 +948,7 @@ sequenceDiagram
 | 層次 | 問題 | 本版解法 |
 |---|---|---|
 | 一致性 | 讀、計算、寫入交錯會否遺失更新？ | 正常色碼只由 owner 推進；同步階段沒有 await |
-| 所有權 | 誰能操作 GPIO？ | 初始化安全熄燈後，只有 LedService.run 的控制流程與 finally |
+| 所有權 | 誰能操作 GPIO？ | 初始化安全熄燈後，只有 LedController.run 的控制流程與 finally |
 | 仲裁 | 多個要求要聽誰的？ | 一般命令 FIFO；警示立即預約、拒絕未執行及新改色；關機優先 |
 | 效果執行 | 紅閃五次如何按時間推進？ | frame 狀態機，不阻塞其他 task |
 
@@ -959,7 +960,7 @@ critical section 描述一致性保障，單一 owner 是責任分配，仲裁�
 
 ```mermaid
 flowchart LR
-    Button[實體按鈕1] -->|cycle| Entry[LedService.submit 同步受理入口]
+    Button[實體按鈕1] -->|cycle| Entry[CommandService.submit 同步受理入口]
     Web[網頁 POST] -->|cycle| Entry
     Light[光照取樣與遲滯] -->|low_light_alert| Entry
     Mqtt[既有 MQTT 指令適配] -->|set_color| Entry
@@ -976,17 +977,17 @@ flowchart LR
     Api --> Browser[網頁顯示]
 ```
 
-核心三個來源是按鈕、Web、光照；原本 MQTT 改色分支也改為提交命令，避免留下第四個直接寫入入口。本次未改 MQTT callback 接線，也未進行 broker 端到端測試，不能因适配分支存在而宣稱 MQTT 指令已實機驗證。
+核心三個來源是按鈕、Web、光照；MQTT callback bridge 也將既有 `led:4`／`led=4` 格式交給同一個CommandService，避免留下第四個直接寫入入口。桌面 fake MQTT／fake GPIO 已驗證 adapter 路徑，但尚未進行真 Broker 或 ESP32 實機端到端測試。
 
 #### 對照實作檔案
 
 | 檔案／函式 | 工作 |
 |---|---|
-| main.main | 建立 LedService、create_task(run)，注入 Web 並傳給生產者 |
-| tasks.button1_task | 讀按鈕、去彈跳、提交 cycle，消耗被拒絕的按下至放開 |
-| tasks.light_sensor_task | 50 ms 取樣，管理 armed 與1000／1100遲滯，提交警示 |
-| services.led_service.LedService.submit | 同步檢查命令、忙碌、停止、容量，建立 receipt，不碰GPIO |
-| LedService.run / _step / _apply | 唯一 owner，每輪最多4筆命令，推進效果並渲染 |
+| main.main | 建立LedController、CommandService、create_task(run)，注入Web並傳給生產者 |
+| tasks.button1_task | 讀按鈕、去彈跳、提交cycle，等待放開；忙碌時由共同命令入口回覆拒絕 |
+| tasks.light_sensor_task | 50 ms取樣，管理armed與裝置設定的遲滯，提交警示 |
+| services.command_service.CommandService.submit | 產生request ID並轉交LedController，不碰GPIO |
+| services.led_controller.LedController.run / _step / _apply | 唯一owner，每輪最多4筆命令，推進效果並渲染 |
 | hardware.led.RgbLed.write | 色碼位元轉三個GPIO，只在輸出改變時寫入 |
 | web_server.api_led_toggle | 受理後回202，不等待整段效果或假稱已執行 |
 | web_server.api_led_command_result | 依ID查目前命令結果 |
@@ -1018,7 +1019,7 @@ flowchart LR
 sequenceDiagram
     participant Browser as 瀏覽器
     participant Api as Web API
-    participant Service as LedService受理入口
+    participant Service as CommandService受理入口
     participant Owner as LED owner task
     participant Pins as RGB GPIO
     Browser->>Api: POST /api/led/toggle
@@ -1114,7 +1115,7 @@ armed仍在光照生產者內管理，50 ms取樣；警示busy期間不rearm。5
 
 ### A8. 部署與驗收
 
-上傳main.py、tasks.py、web_server.py、index.html、hardware/led.py，以及新增services目錄（__init__.py、led_service.py）。保留已正常的hardware/button.py、sensors.py、PIR／RFID模組與私人config.py；LIGHT_ALERT_*使用現有值，這次不用新增配置。重啟ESP32載入HTML快取，確認序列埠印出LED Owner啟動。
+上傳`main.py`、`tasks.py`、`web_server.py`、`index.html`、`hardware/led.py`、`hardware/sensors.py`、`communication/mqtt_client.py`、`services/command_service.py`、`services/led_controller.py`、`services/sensor_snapshot.py`、`config.py`。私人`config.py`的WiFi／密碼必須保留，只同步非機密設定；不要部署`mdy_01/`、`mdy_02/`或`lib_backup/`。重啟ESP32載入新的HTML與服務，確認序列埠印出LED Controller啟動。
 
 有意的差異：安全初始化先熄燈，白色7由owner在系統初始化完成後首次渲染，所以WiFi／NTP／MQTT初始化等待期間不再顯示白色。效果約20 ms frame延遲；Web既有URL維持，但成功受理從200改202。這些不是硬體故障。
 
@@ -1133,8 +1134,8 @@ armed仍在光照生產者內管理，50 ms取樣；警示busy期間不rearm。5
 ### A9. 比較與回復
 
 ```powershell
-git diff main...refactor/led-single-owner -- hardware/led.py tasks.py services/led_service.py
+git diff HEAD~1 HEAD -- hardware/led.py tasks.py services/led_controller.py services/command_service.py
 git switch main
 ```
-
-main保存實驗前程式與講義補充，本分支尚未推送。回復時必須將main版本的hardware/led.py與main/tasks/web_server/index一起部署，不能混用兩版介面；額外services檔案可保留但舊main不會匯入。私人config.py未改，保留WiFi及已確認的警示參數。
+本講義以目前`refactor/architecture-foundation`的P1實作為基準；回復時依`ChangeLog.md`的`mdy_02/`快照還原既有檔案，移除P1新增服務／測試，並保留私人`config.py`中的WiFi設定。`LED_SINGLE_OWNER_GUIDE.md`不再把舊`LedService`介面或未接通MQTT callback描述成目前狀態。
+目前 P1 已提交於 `defafb6`；若回復，依 `ChangeLog.md` 的 `mdy_02/` 快照還原既有檔案，移除 P1 新增服務／測試，並保留私人 `config.py` 的 WiFi／密碼。切換 Git 不會自動更新 ESP32 Flash，部署時必須使用同一版本的程式、服務與非機密配置。

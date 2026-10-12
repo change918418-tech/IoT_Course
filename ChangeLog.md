@@ -15,6 +15,16 @@
 `BUG` 表示行為不符合既有預期；`需求變更` 包含新功能、政策調整、文件與流程要求。一件工作若同時包含兩類，拆分紀錄或明確標示各項原因。
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
+## CHG-20261012-026｜同步 LED 講義與裝置私人配置至 P1
+
+- **類別：**需求變更（文件與裝置部署配置同步）。
+- **日期／紀錄時間：**2026-10-12 20:44:01 +08:00，工具取得台北時間。
+- **原因：**P1 已將舊 `LedService` 介面替換為 `CommandService`／`LedController`，但 `LED_SINGLE_OWNER_GUIDE.md` 與 `LIGHT_LED_ALERT_GUIDE.md` 仍有舊版 token、事件任務、MQTT callback 未接通及部署清單描述；私人 `config.py` 也缺少新的 `LED_CONTROL_MODE` 設定，無法直接以目前 P1 程式配置部署。
+- **作法：**更新兩份 LED 講義，將目前實作改以 `SensorSnapshot`、`CommandService`、`LedController`、MQTT callback bridge、命令 receipt、bounded queue、AUTO／MANUAL、Web 快照與目前部署清單為準；未實作的按鈕 3 綠閃保留並明確標示為提案。更新本機私人 `config.py`，新增 `LED_CONTROL_MODE = 'AUTO'`，保留原有 WiFi SSID／密碼及裝置專屬 `LIGHT_ALERT_TRIGGER_ADC = 500` 校準值；公開 `config.example.py` 的 placeholder WiFi 與 1000／1100 範例值不被私人設定覆蓋。
+- **影響：**ESP32 可直接上傳目前 P1 程式與本機 `config.py`；WiFi／密碼仍保留。私人 `config.py` 仍被 Git 忽略，不納入 commit、備份或公開文件；`mdy_01/`、`mdy_02/` 與 `lib_backup/` 不屬於 ESP32 部署檔案。
+- **驗證：**私人配置匯入檢查確認 `LED_CONTROL_MODE = 'AUTO'` 且 WiFi profiles／裝置專屬 500／1100 閾值未被替換；Python unittest 33/33 通過；`node tests/test_led_polling.cjs`、`node tests/test_rfid_ui.cjs` 通過；指定 Python 檔案 `py_compile` 通過；LED 講義 Mermaid 11.13.0 實際解析 `LED_SINGLE_OWNER_GUIDE.md` 21/21，`LIGHT_LED_ALERT_GUIDE.md` 0 個，共 21/21 通過。未進行 ESP32 實機、真 Broker、外部訂閱者或硬體 GPIO 電氣驗證。
+- **部署／回復：**部署 `main.py`、`tasks.py`、`web_server.py`、`index.html`、`hardware/led.py`、`hardware/sensors.py`、`communication/mqtt_client.py`、`services/command_service.py`、`services/led_controller.py`、`services/sensor_snapshot.py`、`config.py` 與必要的 `lib/` 檔案；不要部署 `mdy_01/`、`mdy_02/`、`lib_backup/`。回復時還原兩份講義與 `config.py` 的 `LED_CONTROL_MODE`，並保留私人 WiFi／密碼。
+
 ## CHG-20261012-025｜實作 P1 SensorSnapshot、CommandService 與 LedController
 
 - **類別：**需求變更（P1 核心架構改善）。
