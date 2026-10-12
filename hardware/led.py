@@ -1,4 +1,4 @@
-"""GPIO adapter. After initialization, only LedService.run writes this object."""
+"""GPIO adapter. After initialization, only LedController.run writes this object."""
 from machine import Pin
 import config
 

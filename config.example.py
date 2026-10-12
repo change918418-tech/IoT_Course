@@ -37,6 +37,8 @@ RFID_CS_PIN = 13
 # ==================== 感測器參數 ====================
 
 # 光感測器閾值
+# LED 控制模式：AUTO 允許光感低光警示；MANUAL 不由光感覆蓋使用者命令
+LED_CONTROL_MODE = 'AUTO'
 LIGHT_ALERT_ENABLED = True
 LIGHT_ALERT_TRIGGER_ADC = 1000  # 嚴格低於此值觸發一次
 LIGHT_ALERT_RESET_ADC = 1100    # 回升至此值以上才允許下一次

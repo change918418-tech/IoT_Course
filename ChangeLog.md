@@ -15,6 +15,60 @@
 `BUG` 表示行為不符合既有預期；`需求變更` 包含新功能、政策調整、文件與流程要求。一件工作若同時包含兩類，拆分紀錄或明確標示各項原因。
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
+## CHG-20261012-025｜實作 P1 SensorSnapshot、CommandService 與 LedController
+
+- **類別：**需求變更（P1 核心架構改善）。
+- **日期／紀錄時間：**2026-10-12 16:53:00 +08:00，工具取得台北時間。
+- **原因：**P0 已修復 MQTT callback 與發佈狀態語意，但按鈕、Web、MQTT、光感仍需要以一致的 LED 命令邊界與狀態模型協作；感測資料也需要與硬體讀取解耦，避免 Web／OLED／MQTT 各自讀取或重複觸發感測器。
+- **作法：**新增 `services/sensor_snapshot.py`，集中保存溫度、濕度、光照的 last-good value、valid、quality、age、error 與 sample sequence；新增 `services/command_service.py`，產生遞增 request ID 並提供共同命令入口；以 `services/led_controller.py` 取代 `services/led_service.py`，成為唯一 LED GPIO owner，建立 bounded queue／result history、desired／enabled／applied 分離、AUTO／MANUAL 模式、低光警示保存／恢復與命令 receipt。更新 `main.py` 組裝並注入三個核心服務；更新 `tasks.py` 將按鈕、光感與 MQTT 訂閱遷移到 CommandService，DHT／光感 producer 更新 SensorSnapshot，且光感讀值失敗或未知時不提交 LED 警示命令，OLED／MQTT 發佈讀取快照；更新 `web_server.py` 讓 `/api/data` 只讀快照，LED toggle、canonical commands、mode、status、result 路由共用 CommandService。更新 `hardware/sensors.py` 保留感測 last-good 值與錯誤；更新 `config.example.py` 的 `LED_CONTROL_MODE`；刪除舊 `services/led_service.py`。保留 MQTT 既有 `led:4`／`led=4` payload 邊界，未在本次加入重連重新訂閱、權限／TLS、Broker ACK 或 supervisor。
+- **輪次備份：**在本回合任何既有程式檔案修改前建立 `mdy_02/`，保存本回合涉及的 `main.py`、`tasks.py`、`web_server.py`、`config.example.py`、`hardware/sensors.py`、`hardware/led.py`、`services/led_service.py` 與既有測試原始版本；未備份私人 `config.py`，未建立或覆蓋 `mdy_03/`。新增的 P1 核心檔案與測試沒有「修改前既有版本」。
+- **影響：**四個 LED 命令來源共用 request ID、輸入驗證、有限佇列與結果語意；owner frame 以外不直接寫 GPIO。光感 AUTO 低光警示完成後恢復使用者 desired state，MANUAL 拒絕光感覆蓋；感測失敗不再以 `-1` 覆蓋 last-good value，而由 Snapshot 明確表達品質與年齡，未知光感值也不會觸發控制命令。Web 仍保留舊 LED toggle 與 MQTT wire format，HTTP `202` 僅代表命令已受理。
+- **文件：**同步更新 `IOT_ARCHITECTURE_TECH_TREE.md`、`SYSTEM_ARCHITECTURE.md`、`WEB_UI_EXECUTION_GUIDE.md`，將 P1 實作狀態、資料／命令流、歷史 P0 討論與驗收界線分開記錄。
+- **驗證：**`python -B -m unittest discover -s tests -v` 通過 33/33；`node tests/test_led_polling.cjs` 通過；`node tests/test_rfid_ui.cjs` 通過；指定 P1 Python 檔案 `py_compile` 通過。桌面 fake GPIO／fake MQTT／Microdot TestClient 已覆蓋單一 owner、AUTO 警示恢復、MANUAL 拒絕、last-good snapshot、未知光感不提交警示、bounded queue、request ID、Web command result 與 MQTT command adapter。Mermaid 11.13.0 實際解析 `IOT_ARCHITECTURE_TECH_TREE.md` 1/1、`SYSTEM_ARCHITECTURE.md` 1/1、`WEB_UI_EXECUTION_GUIDE.md` 12/12，共 14/14 個 Mermaid 區塊通過。未進行 ESP32 實機、真 Broker、外部訂閱者或硬體 GPIO 電氣驗證。
+- **部署／回復：**部署 `main.py`、`tasks.py`、`web_server.py`、`hardware/sensors.py`、`hardware/led.py`、`config.example.py`、`services/command_service.py`、`services/sensor_snapshot.py`、`services/led_controller.py`、對應 `tests/` 與文件；不要部署 `mdy_02/`，不要覆蓋私人 `config.py`。回復時以 `mdy_02/` 對應快照還原既有檔案，並移除本回合新增服務／測試；若回復至 P0，需同步恢復 `services/led_service.py` 及其呼叫者契約。
+
+## CHG-20261012-024｜實作 P0 MQTT callback、指令派送與發佈狀態語意
+
+- **類別：**BUG（MQTT 入站 callback 斷路、連線結果未檢查、HTTP 發佈完成語意錯誤）。
+- **日期／紀錄時間：**2026-10-12 15:43:08 +08:00，工具取得台北時間。
+- **原因：**`lib/mqtt_as.py` 以同步三參數呼叫收訊 callback，但 adapter 原本使用非同步 `on_message()`；訂閱時傳入的 callback 未被保存；MQTT 任務忽略 `wait_connected()`；`POST /api/publish` 將 Event 受理誤報成已完成發佈，且前端只依 HTTP 成功顯示已發布。
+- **作法：**修改 `communication/mqtt_client.py`：建立同步 callback bridge、保存並派送訂閱 handler、以連線 callback／Event確認 `wait_connected()`、追蹤發佈 `accepted`／`publishing`／`published`／`failed`／`unavailable`。修改 `tasks.py`：訂閱 callback 維持既有 `led:4`／`led=4` 格式，解析後交給 `LedService.submit()`；發佈任務檢查連線並更新結果。修改 `web_server.py`：`/api/publish` 回傳 JSON 與 HTTP 202／503，新增 no-store 的 `/api/publish/status`。修改 `index.html`：依 JSON status 顯示「已受理」或錯誤，不把 accepted 宣稱成完成。同步更新 `IOT_ARCHITECTURE_TECH_TREE.md`、`SYSTEM_ARCHITECTURE.md`、`WEB_UI_EXECUTION_GUIDE.md`。未修改 `lib/mqtt_as.py`，未提前建立 P1 完整 `CommandService`。
+- **輪次備份：**在本回合程式修改前建立 `mdy_01/`，保存 `communication/mqtt_client.py`、`tasks.py`、`web_server.py`、`index.html` 與 `tests/test_mqtt.py` 的修改前版本；不含私人設定與秘密。下次程式修改輪次應使用 `mdy_02/`。
+- **影響：**MQTT 入站 LED 指令現在到達既有單一 `LedService.submit()` 受理邊界；HTTP 發佈可區分受理與背景任務最近結果；既有 MQTT payload 格式與 QoS 0 不變。Event 仍是單一旗標，重複觸發可能合併；重連後重新訂閱、完整 P1 `CommandService`、Broker ACK 與權限安全仍未納入。
+- **驗證：**MQTT 專項測試 10/10 通過；完整 Python 測試 33/33 通過；`node tests/test_led_polling.cjs` 與 `node tests/test_rfid_ui.cjs` 通過；`python -B -m py_compile communication/mqtt_client.py tasks.py web_server.py tests/test_mqtt.py` 通過；Mermaid 11.13.0 實際解析 `IOT_ARCHITECTURE_TECH_TREE.md` 1/1、`SYSTEM_ARCHITECTURE.md` 1/1、`WEB_UI_EXECUTION_GUIDE.md` 12/12；`git diff --check` 無差異錯誤；桌面 fake MQTT／fake LED 已確認同步 callback、`LedService.submit()` 派送、連線逾時與 HTTP JSON 狀態分層。ESP32 實機、真 Broker、外部訂閱者與斷線重連尚未驗證。
+- **部署／回復：**部署 `communication/mqtt_client.py`、`tasks.py`、`web_server.py`、`index.html`，並依專案既有部署清單重啟裝置；不部署 `mdy_01/`。回復時以 `mdy_01/` 對應快照還原上述檔案，或使用 Git 差異回復；不要覆蓋私人 `config.py`。
+
+## CHG-20261012-023｜記錄 P0 MQTT 與 P1 共用命令入口討論及程式輪次備份規則
+
+- **類別：**需求變更（架構決策與版控流程）。
+- **日期／紀錄時間：**2026-10-12 15:29:46 +08:00，工具取得台北時間。
+- **原因：**兩輪討論釐清IOT架構技術樹P0的MQTT修正邊界，以及是否要提前導入P1的MQTT／Web／按鈕共用命令入口；同時使用者要求未來每一輪程式修改先保存原始版本，依序放入`mdy_01`、`mdy_02`等目錄。
+- **討論紀錄：**第一輪確認目前`mqtt_as`以同步方式呼叫`subs_cb(topic, msg, retained)`，但`MqttManager.on_message()`為非同步函式；`MqttManager.subscribe()`忽略傳入callback；MQTT任務忽略`wait_connected()`結果；`POST /api/publish`把事件觸發誤報為資料已發佈。第二輪決定P0只修正callback bridge、指令派送、連線結果及accepted／published／failed語意，保留現行`lib/mqtt_as.py`，並讓MQTT指令進入既有`LedService.submit()`；P1才建立完整`CommandService`，一次遷移按鈕、Web與MQTT，避免P0形成半套第二命令入口。
+- **作法：**將上述兩輪討論詳記於`IOT_ARCHITECTURE_TECH_TREE.md`的P0／P1段落；將程式修改前的輪次備份規則加入`GIT_VERSION_CONTROL.md`。第一次程式修改回合使用`mdy_01/`，下一回合使用`mdy_02/`，備份保留相對路徑且排除私人`config.py`與所有秘密。本次只有文件修改，尚未建立`mdy_01/`，也未修改程式。
+- **影響：**後續P0實作必須以`LedService.submit()`作為現有單一LED命令受理邊界，不得由MQTT callback直接寫GPIO或複製仲裁政策；P1再引入完整`CommandService`。每一輪程式修改均可由對應`mdy_N/`回復，且封存備份不得部署到ESP32。
+- **驗證：**已檢查文件內容與目前P0／P1方案一致；`git diff --check`無差異錯誤；Mermaid 11.13.0實際解析`IOT_ARCHITECTURE_TECH_TREE.md`的1/1個圖表區塊；本次未修改程式，因此不宣稱完成MQTT修正，也未建立`mdy_01/`，未執行程式測試。
+- **部署／回復：**本次只納入文件變更，不需上傳ESP32。回復時還原`IOT_ARCHITECTURE_TECH_TREE.md`、`GIT_VERSION_CONTROL.md`與`ChangeLog.md`本次段落；未來程式回合須先備份再修改，回復優先使用對應`mdy_N/`快照。
+
+## CHG-20261012-022｜整理 lib 重複函式庫並建立封存目錄
+
+- **類別：**需求變更（架構與部署結構）。
+- **日期／紀錄時間：**2026-10-12 14:49:29 +08:00，工具取得台北時間。
+- **原因：**`lib/`同時存在3個MFRC522、2個Queue與2個MQTT實作；多份可替代模組會讓部署選擇、import 路徑與後續架構調整的基線不明。
+- **作法：**保留`lib/mfrc522_async.py`、`lib/async_queue.py`與`lib/mqtt_as.py`；建立`lib_backup/`，將`mfrc522.py`、`mfrc522_async_sync.py`、`queue_ns_async.py`與`mqtt_async.py`移入封存。更新`SYSTEM_ARCHITECTURE.md`的目錄、部署清單與選擇理由；未修改目前主流程的import。
+- **選擇理由：**RFID保留`mfrc522_async.py`，因`hardware/rfid.py`明確使用`MFRC522Async`及非同步`request`／`anticoll`，且測試契約相同；Queue保留較小且單一責任的`async_queue.py`，兩者目前都無呼叫者，而`queue_ns_async.py`額外含未使用且`task_done()`為空實作的`SimpleQueue`；MQTT保留`mqtt_as.py`，因`communication/mqtt_client.py`明確匯入其`MQTTClient`與`config`，是現行主流程契約。
+- **影響：**目前裝置程式的有效函式庫集合只保留上述三個檔案；封存檔不應上傳ESP32。既有RFID、MQTT與桌面測試的import路徑不變；Queue仍未接入目前主流程。
+- **驗證：**靜態分析確認現行程式沒有引用移入封存的模組；檢查確認`lib/`保留3個指定模組且`lib_backup/`存在4個封存檔；`python -B -m unittest discover -s tests -v`通過24/24；`git diff --check`無差異錯誤；Mermaid 11.13.0實際解析`SYSTEM_ARCHITECTURE.md`與`IOT_ARCHITECTURE_TECH_TREE.md`共2/2個圖表區塊。未進行ESP32實機部署或讀卡／Broker端到端驗證。
+- **部署／回復：**部署時只帶`lib/`內仍被主流程需要的檔案，不上傳`lib_backup/`。回復時可將封存檔移回`lib/`，但恢復任何替代MQTT／RFID實作前必須重新確認import與API契約；不覆蓋私人`config.py`。
+
+## CHG-20261012-021｜以第一性原理重整完整技術樹六問格式
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-10-12 13:02:37 +08:00，工具取得台北時間。
+- **原因：**既有技術樹已涵蓋物聯網架構能力，但每個節點的欄位名稱使用「使用時機」，未完全對齊使用者要求的「使用前提、使用情境、是什麼、為什麼、做什麼、怎麼做」六問格式；文件開頭也未明確說明技術點／知識點及提案與現況的界線。
+- **作法：**重整`IOT_ARCHITECTURE_TECH_TREE.md`標題與導言，明確由物理限制、時間、資源、信任與可驗證性推導A01～H04共32個技術點／知識點；將全部32個節點的欄位統一為六問格式，並補充每一欄的閱讀定義與尚未部署的提案標示原則。未修改韌體、設定、API或測試程式。
+- **影響：**學生可依A→H閱讀完整技術樹，逐點回答採用條件、問題情境、概念定義、必要性、責任與實作方式；既有系統架構與程式行為不變。
+- **驗證：**已以Mermaid 11.13.0實際解析`IOT_ARCHITECTURE_TECH_TREE.md`的1/1個圖表區塊；已檢查32個節點均具有六個欄位，且不再使用`使用時機`欄位；`git diff --check`無差異錯誤；`python -B -m unittest discover -s tests -v`通過24/24。未進行ESP32實機驗證。
+- **部署／回復：**只需納入`IOT_ARCHITECTURE_TECH_TREE.md`與`ChangeLog.md`，不需重新上傳ESP32。回復時還原這兩個文件的本次變更；不應回復或覆蓋私人`config.py`。
 
 ## CHG-20261012-020｜縮短PIR重新武裝等待
 

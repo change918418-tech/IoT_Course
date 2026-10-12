@@ -15,38 +15,35 @@ from communication.wifi import get_current_time
 
 # ==================== 任務：按鈕監聽 ====================
 
-async def button1_task(button1, led_service, publish_event):
+async def button1_task(button1, command_service, publish_event):
     """
-    按鈕 1 監聽任務
-    功能：按下按鈕1時，循環切換 LED 顏色
+    按鈕 1 監聽任務。
+
+    按鈕只產生命令，不在 adapter 內判斷 LED busy 或操作硬體。
     """
     button_id = 1
     print(f"[Task] 按鈕 {button_id} 監聽已啟動")
 
     while True:
         try:
-            await button1.wait_press(reject_if=lambda: led_service.busy)
+            await button1.wait_press()
             print(f"[Button] 按鈕 {button_id} 被按下")
-
-            if button1.press_rejected:
-                print('[Button] 警示期間按下，不執行；請放開後重新按下')
-            else:
-                receipt = led_service.submit('cycle', 'button1')
-                print('[Button] LED 命令:', receipt)
-
+            receipt = command_service.submit('cycle', 'button1')
+            print('[Button] LED 命令:', receipt)
             await button1.wait_release()
             print(f"[Button] 按鈕 {button_id} 被釋放")
-
             await uasyncio.sleep_ms(100)
         except Exception as e:
             print(f"[Error] 按鈕 {button_id} 任務異常: {e}")
             await uasyncio.sleep(1)
 
 
-async def button2_task(button2, dht_sensor, mqtt_manager, publish_event):
+
+async def button2_task(button2, mqtt_manager, publish_event):
     """
-    按鈕 2 監聽任務
-    功能：按下按鈕2時，讀取溫濕度並透過 MQTT 發佈
+    按鈕 2 監聽任務。
+
+    只向 MQTT 發佈 adapter 提交請求，不讀取或改寫感測資料。
     """
     button_id = 2
     print(f"[Task] 按鈕 {button_id} 監聽已啟動")
@@ -55,13 +52,10 @@ async def button2_task(button2, dht_sensor, mqtt_manager, publish_event):
         try:
             await button2.wait_press()
             print(f"[Button] 按鈕 {button_id} 被按下")
-
-            publish_event.set()
-            print("[Task] 觸發溫濕度發佈事件")
-
+            receipt = mqtt_manager.request_publish(publish_event)
+            print("[Task] MQTT 溫濕度發佈請求:", receipt)
             await button2.wait_release()
             print(f"[Button] 按鈕 {button_id} 被釋放")
-
             await uasyncio.sleep_ms(100)
         except Exception as e:
             print(f"[Error] 按鈕 {button_id} 任務異常: {e}")
@@ -171,44 +165,52 @@ async def music_on_motion_task(speaker, motion_event, motion_state=None):
             motion_state['music_status'] = 'stopped'
 
 
-async def dht11_read_task(dht_sensor):
+async def dht11_read_task(dht_sensor, sensor_snapshot=None):
     """
-    DHT11 溫濕度讀取任務
-    定期讀取溫濕度，並儲存最新資料供其他任務使用
+    DHT11 量測 producer；成功值與品質交給 SensorSnapshot。
     """
     print("[Task] DHT11 讀取任務已啟動")
 
     while True:
         try:
             result = dht_sensor.measure()
-            if result:
-                temp, humi = result
-                #print(f"[DHT11] 溫度: {temp}℃, 濕度: {humi}%")
-            else:
-                print("[DHT11] 量測失敗，使用上次資料")
-
+            if sensor_snapshot is not None:
+                sensor_snapshot.update_dht(
+                    result, getattr(dht_sensor, 'last_error', None))
+            if result is None:
+                print("[DHT11] 量測失敗，保留上次有效資料")
             await uasyncio.sleep(config.DHT11_POLL_INTERVAL_SEC)
         except Exception as e:
+            if sensor_snapshot is not None:
+                sensor_snapshot.update_dht(None, str(e))
             print(f"[Error] DHT11 任務異常: {e}")
             await uasyncio.sleep(config.DHT11_POLL_INTERVAL_SEC)
 
 
-async def light_sensor_task(light_sensor, led_service):
-    """Hysteresis producer; no GPIO and no effect sequencing."""
+async def light_sensor_task(light_sensor, command_service, sensor_snapshot=None):
+    """Light producer; samples and submits, but never applies LED effects."""
     print('[Task] 光照命令生產者已啟動')
     armed = True
     while True:
         try:
             brightness = light_sensor.read()
-            if getattr(config, 'LIGHT_ALERT_ENABLED', True) and not led_service.busy:
+            sample_error = getattr(light_sensor, 'last_error', None)
+            if sensor_snapshot is not None:
+                sensor_snapshot.update_light(brightness, sample_error)
+            if sample_error is not None or brightness is None:
+                await uasyncio.sleep_ms(config.LIGHT_POLL_INTERVAL_MS)
+                continue
+            if getattr(config, 'LIGHT_ALERT_ENABLED', True):
                 if brightness >= getattr(config, 'LIGHT_ALERT_RESET_ADC', 1100):
                     armed = True
                 elif armed and brightness < getattr(config, 'LIGHT_ALERT_TRIGGER_ADC', 1000):
-                    receipt = led_service.submit('low_light_alert', 'light')
+                    receipt = command_service.submit('low_light_alert', 'light')
                     if receipt['status'] == 'accepted':
                         armed = False
                     print('[Light] LED 命令:', receipt)
         except Exception as e:
+            if sensor_snapshot is not None:
+                sensor_snapshot.update_light(None, str(e))
             print('[Error] 光照取樣異常:', e)
         await uasyncio.sleep_ms(config.LIGHT_POLL_INTERVAL_MS)
 
@@ -244,15 +246,9 @@ async def rfid_read_task(rfid_reader, rfid_state):
         await uasyncio.sleep_ms(config.RFID_POLL_INTERVAL_MS)
 
 
-async def oled_display_task(dht_sensor):
+async def oled_display_task(sensor_snapshot):
     """
-    OLED 顯示更新任務（修正版）
-    每秒更新 OLED 螢幕，顯示時間、溫濕度等資訊
-
-    功能：
-    • 第一行：日期、星期、時間
-    • 第二行：溫度、濕度
-    使用 hardware.display.OledDisplay 負責硬體初始化
+    OLED 顯示更新任務；只讀 SensorSnapshot，不直接量測 DHT。
     """
     print("[Task] OLED 顯示任務已啟動")
 
@@ -263,113 +259,105 @@ async def oled_display_task(dht_sensor):
     except Exception as e:
         print(f"[OLED] 初始化失敗: {e}")
         print("[OLED] 使用簡化模式（只輸出日誌）")
-        oled = None
 
     while True:
         try:
-            # 取得時間與溫溼度
             date_str, weekday_str, time_str = get_current_time()
-            temp, humi = dht_sensor.get_data()
-
-            # 防呆：避免 NoneType 傳到字型庫
+            snapshot = sensor_snapshot.snapshot()
+            temp = snapshot['temperature']['value']
+            humi = snapshot['humidity']['value']
             date_str = "" if date_str is None else str(date_str)
             weekday_str = "" if weekday_str is None else str(weekday_str)
             time_str = "" if time_str is None else str(time_str)
-
-            temp = 0 if temp is None else temp
-            humi = 0 if humi is None else humi
-
+            temp = "--" if temp is None else temp
+            humi = "--" if humi is None else humi
             line1 = f"{date_str} 週{weekday_str} {time_str[:5]}"
             line2 = f"溫度：{temp}℃ 濕度：{humi}%"
-
             if oled is not None:
                 try:
                     oled.show_two_lines(line1, line2)
                 except Exception as e:
                     print(f"[OLED] 顯示更新異常: {e}")
-
-            #print(f"[Display] {line1} | 溫: {temp}℃ 濕: {humi}%")
-
             await uasyncio.sleep(1)
         except Exception as e:
             print(f"[Error] OLED 顯示任務異常: {e}")
             await uasyncio.sleep(1)
 
-
 # ==================== 任務：MQTT 發佈 ====================
 
-async def mqtt_publish_task(dht_sensor, mqtt_manager, publish_event):
+async def mqtt_publish_task(sensor_snapshot, mqtt_manager, publish_event):
     """
-    MQTT 發佈任務
-    監聽 publish_event，在事件觸發時發佈溫濕度訊息
+    MQTT 發佈任務；只讀 SensorSnapshot，不直接讀取感測器。
     """
     print("[Task] MQTT 發佈任務已啟動")
 
-    await mqtt_manager.wait_connected()
-    print("[MQTT Pub] 已連線，開始監聽發佈事件")
+    if not await mqtt_manager.wait_connected():
+        print("[MQTT Pub] 未確認連線，停止發佈任務")
+        return
+    print("[MQTT Pub] 已確認連線，開始監聽發佈事件")
 
     while True:
         try:
             await publish_event.wait()
-
-            temp, humi = dht_sensor.get_data()
+            mqtt_manager.mark_publish_started()
+            snapshot = sensor_snapshot.snapshot()
+            temp = snapshot['temperature']['value']
+            humi = snapshot['humidity']['value']
             temp = 0 if temp is None else temp
             humi = 0 if humi is None else humi
-
             message = f'{config.DEVICE_NAME}：溫度：{temp}℃, 濕度：{humi}%'
-
             success = await mqtt_manager.publish(
-                config.MQTT_TOPICS['temp_humi'],
-                message,
-                qos=0
-            )
-
+                config.MQTT_TOPICS['temp_humi'], message, qos=0)
+            mqtt_manager.mark_publish_finished(success)
             if success:
                 print(f"[MQTT Pub] 溫濕度已發佈: {message}")
             else:
                 print("[MQTT Pub] 發佈失敗")
-
-            publish_event.clear()
-            await uasyncio.sleep_ms(100)
         except Exception as e:
+            mqtt_manager.mark_publish_finished(False)
             print(f"[Error] MQTT 發佈任務異常: {e}")
-            await uasyncio.sleep(1)
+        finally:
+            publish_event.clear()
+        await uasyncio.sleep_ms(100)
 
 
 # ==================== 任務：MQTT 訂閱與指令處理 ====================
 
-async def mqtt_subscribe_task(mqtt_manager, led_service):
+async def mqtt_subscribe_task(mqtt_manager, command_service):
     """
-    MQTT 訂閱與指令處理任務
-    監聽 MQTT 訂閱的訊息，並根據指令控制裝置
+    MQTT callback 只解析指令並送入 CommandService。
+
+    P1 先維持 P0 的 led:4／led=4 wire format，內部統一成命令契約。
     """
     print("[Task] MQTT 訂閱任務已啟動")
 
-    await mqtt_manager.wait_connected()
-    print("[MQTT Sub] 已連線，開始監聽指令")
+    if not await mqtt_manager.wait_connected():
+        print("[MQTT Sub] 未確認連線，停止訂閱任務")
+        return
 
-    async def handle_cmd(msg):
+    def handle_cmd(topic, msg, retained):
         try:
             msg_str = msg.decode() if isinstance(msg, bytes) else msg
             print(f"[MQTT Sub] 收到指令: {msg_str}")
-
-            if 'led' in msg_str.lower():
-                try:
-                    led_value = int(msg_str.split(':')[-1].split('=')[-1].strip())
-                    receipt = led_service.submit('set_color', 'mqtt', led_value)
-                    print('[MQTT Sub] LED 命令:', receipt)
-                except ValueError:
-                    print("[MQTT Sub] 指令解析失敗（無效索引）")
-                except Exception as e:
-                    print(f"[MQTT Sub] 指令解析異常: {e}")
+            if 'led' not in msg_str.lower():
+                print("[MQTT Sub] 忽略未知指令")
+                return
+            try:
+                led_value = int(msg_str.split(':')[-1].split('=')[-1].strip())
+            except (TypeError, ValueError):
+                print("[MQTT Sub] 指令解析失敗（無效索引）")
+                return
+            receipt = command_service.submit('set_color', 'mqtt', led_value)
+            print('[MQTT Sub] LED 命令:', receipt)
         except Exception as e:
             print(f"[Error] 指令處理異常: {e}")
 
-    await mqtt_manager.subscribe(
-        config.MQTT_TOPICS['cmd'],
-        qos=0,
-        callback=handle_cmd
-    )
+    subscribed = await mqtt_manager.subscribe(
+        config.MQTT_TOPICS['cmd'], qos=0, callback=handle_cmd)
+    if not subscribed:
+        print("[MQTT Sub] 指令主題訂閱失敗")
+        return
 
+    print("[MQTT Sub] 已確認訂閱，開始監聽指令")
     while True:
         await uasyncio.sleep(10)

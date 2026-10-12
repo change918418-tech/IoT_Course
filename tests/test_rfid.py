@@ -113,7 +113,17 @@ class RfidTests(unittest.TestCase):
                 web = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(web)
             web.rfid_state.update(status='read_error', last_uid='0102030404', error='bad "card"')
-            web.light_sensor = types.SimpleNamespace(read=lambda: 0)
+            web.sensor_snapshot = types.SimpleNamespace(snapshot=lambda: {
+                'temperature': {'value': None, 'valid': False, 'quality': 'unavailable',
+                                'age_ms': None, 'error': None, 'updated_at_ms': None},
+                'humidity': {'value': None, 'valid': False, 'quality': 'unavailable',
+                             'age_ms': None, 'error': None, 'updated_at_ms': None},
+                'light': {'value': 0, 'valid': True, 'quality': 'good',
+                          'age_ms': 0, 'error': None, 'updated_at_ms': 0},
+                'sample_seq': 1,
+                'status': 'partial',
+            })
+            web.light_sensor = None
             response = asyncio.run(web.api_data(None))
             body = response.body.decode() if isinstance(response.body, bytes) else response.body
             data = json.loads(body)

@@ -1,4 +1,4 @@
-"""GPIO adapter tests; policy lives in LedService."""
+"""GPIO adapter tests; policy lives in LedController."""
 import importlib.util
 from pathlib import Path
 import sys

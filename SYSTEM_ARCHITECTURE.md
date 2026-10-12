@@ -1,6 +1,6 @@
 # IoT 教學專案系統架構
 
-> 本文件於 2026-10-11 14:32:36 +08:00 依目前原始碼重新整理。程式註解、舊版文件與實作不同時，以目前 `main.py`、`tasks.py`、`services/`、`hardware/`、`communication/` 與 `web_server.py` 的實作為準。
+> 本文件於 2026-10-12 14:49:29 +08:00 依目前原始碼與本次函式庫整理更新。程式註解、舊版文件與實作不同時，以目前 `main.py`、`tasks.py`、`services/`、`hardware/`、`communication/` 與 `web_server.py` 的實作為準。
 >
 > 本文件描述的是 ESP32／MicroPython 裝置端架構。桌面 fake GPIO 測試不能取代實際開發板、接線、韌體、WiFi、MQTT 或周邊驗證。
 
@@ -13,12 +13,12 @@
 - DHT11 量測溫度與濕度。
 - TEMT 光感測器透過 ADC 讀取原始亮度值，低光時觸發 RGB LED 警示。
 - 兩個實體按鈕分別控制 LED 換色與觸發 MQTT 溫濕度發佈。
-- `LedService` 作為 RGB LED 的唯一硬體 owner，仲裁按鈕、光感、Web 與預留 MQTT 指令來源。
+- `CommandService` 作為按鈕、光感、Web 與 MQTT 的唯一 LED 命令入口；`LedController` 是 RGB LED 的唯一硬體 owner。
 - PIR 偵測移動，透過事件觸發無源喇叭旋律。
 - MFRC522 RFID 讀卡，將最後成功結果與最近 5 次讀卡紀錄保存在 RAM 快照。
 - SSD1306 OLED 顯示日期、星期、時間、溫度與濕度。
 - 裝置上的 Microdot HTTP Server 提供儀表板與 REST API。
-- MQTT 連接外部 Broker，發佈溫濕度；遠端 LED 指令目前有解析任務，但 callback 尚未真正接通。
+- MQTT 連接外部 Broker，發佈溫濕度；遠端 LED 指令已由同步 callback 解析後交給 `CommandService`，但重連後重新訂閱仍待補強。
 
 目前沒有資料庫、歷史資料儲存、獨立雲端應用伺服器、帳號系統或 OTA 更新流程。感測、RFID、PIR、LED 與音樂狀態主要保存在裝置 RAM，重啟後不保留。
 
@@ -34,12 +34,12 @@ flowchart LR
     Main --> Runtime[共享事件與狀態]
     Runtime --> Scheduler[uasyncio gather]
     Scheduler --> Tasks[tasks.py]
-    Scheduler --> LedOwner[LedService.run]
+    Scheduler --> LedOwner[LedController.run]
     Scheduler --> Web[web_server.py]
     Tasks --> Sensors[感測器與輸入]
     Tasks --> Display[OLED 與喇叭]
     Tasks --> Mqtt
-    Web --> LedOwner
+    Web --> Command[CommandService]
     Web --> Sensors
     Web --> Mqtt
     LedOwner --> Rgb[RGB LED GPIO]
@@ -66,14 +66,15 @@ flowchart LR
 | 組裝／生命週期 | `main.py` | 建立硬體、WiFi、時間、MQTT、LED owner 與共享狀態；啟動 13 個協程；處理停止與例外清理。 |
 | 組態 | `config.py` | GPIO、輪詢週期、光照門檻、WiFi profiles、MQTT topics、裝置名稱與色碼。公開基線為 `config.example.py`。 |
 | 應用協調 | `tasks.py` | 按鈕、DHT、光感、PIR、RFID、OLED、喇叭、MQTT 發佈與訂閱任務。 |
-| 控制服務 | `services/led_service.py` | LED 命令受理、busy 仲裁、有限佇列、警示效果、結果快照與唯一 GPIO owner。 |
+| 控制服務 | `services/command_service.py`、`services/led_controller.py` | 統一命令入口、request ID、驗證、有限佇列、AUTO／MANUAL 仲裁、結果快照與唯一 GPIO owner。 |
 | HTTP 介面 | `web_server.py` | Microdot 路由、HTML 載入、感測資料查詢、LED 命令、MQTT 發佈事件與狀態快照。 |
 | 使用者介面 | `index.html`、`assets/uplot/1.6.32/` | HTML／CSS／JavaScript 儀表板；uPlot 本機資產由 Web 路由提供。 |
 | WiFi／時間 | `communication/wifi.py` | 包裝已知 WiFi 連線、NTP 校時與目前時間字串。 |
 | MQTT 轉接器 | `communication/mqtt_client.py` | 包裝 `mqtt_as.MQTTClient`，提供連線、等待、發佈、訂閱與回呼入口。 |
-| 硬體抽象 | `hardware/led.py` | 三個 GPIO 的 3-bit RGB 輸出；只有 `LedService.run()` 應在初始化後寫入。 |
+| 硬體抽象 | `hardware/led.py` | 三個 GPIO 的 3-bit RGB 輸出；只有 `LedController.run()` 應在初始化後寫入。 |
 | 硬體抽象 | `hardware/button.py` | 上拉輸入、低電位按下、非同步輪詢、去彈跳與等待釋放。 |
-| 硬體抽象 | `hardware/sensors.py` | DHT11 量測／快取、PIR 輸入與 ADC 光感讀取。 |
+| 硬體抽象 | `hardware/sensors.py` | DHT11 與 ADC 驅動；失敗不覆寫 last-good 值。 |
+| 共享快照 | `services/sensor_snapshot.py` | 感測值、valid、quality、age、error 與 sample sequence。 |
 | 硬體抽象 | `hardware/display.py` | I2C／SSD1306 初始化、兩行文字與可選點陣字型。 |
 | 硬體抽象 | `hardware/rfid.py` | MFRC522 非同步讀 UID 與格式化；讀取狀態由 `tasks.py` 保存。 |
 | 硬體抽象 | `hardware/speaker.py` | PWM 音符播放、靜音與資源釋放。 |
@@ -94,7 +95,9 @@ flowchart LR
 ├── web_server.py
 ├── index.html
 ├── services/
-│   └── led_service.py
+│   ├── command_service.py
+│   ├── led_controller.py
+│   └── sensor_snapshot.py
 ├── communication/
 │   ├── wifi.py
 │   └── mqtt_client.py
@@ -107,20 +110,34 @@ flowchart LR
 │   ├── sensors.py
 │   └── speaker.py
 ├── tests/
-└── lib/
-    ├── microdot/
-    ├── ns_tools.py
-    ├── aiot_tools.py
-    ├── mqtt_as.py
-    ├── mqtt_async.py
-    ├── ssd1306.py
-    ├── bitmap_font_tool.py
-    ├── mfrc522_async.py
-    ├── mfrc522_async_sync.py
+├── lib/
+│   ├── microdot/
+│   ├── ns_tools.py
+│   ├── aiot_tools.py
+│   ├── mqtt_as.py                 # 主流程使用
+│   ├── ssd1306.py
+│   ├── bitmap_font_tool.py
+│   ├── mfrc522_async.py           # 主流程使用
+│   ├── async_queue.py             # 保留的唯一 Queue 實作；目前主流程未引用
+│   ├── fonts/fusion_bdf.12
+│   └── 其他未整合函式庫
+└── lib_backup/                    # 來源封存，不納入裝置部署
     ├── mfrc522.py
-    ├── fonts/fusion_bdf.12
-    └── 其他未整合函式庫
+    ├── mfrc522_async_sync.py
+    ├── queue_ns_async.py
+    └── mqtt_async.py
 ```
+
+### 重複模組整理決策
+
+| 類別 | `lib/` 保留 | 移入 `lib_backup/` | 保留理由 |
+|---|---|---|---|
+| MFRC522 | `mfrc522_async.py` | `mfrc522.py`、`mfrc522_async_sync.py` | `hardware/rfid.py` 明確延後匯入 `MFRC522Async`，並以 `await request()`、`await anticoll()` 讀卡；此檔案符合目前 `uasyncio` 主流程與 RFID 測試替身契約。同步版及同步／非同步混合版沒有目前呼叫者。 |
+| Queue | `async_queue.py` | `queue_ns_async.py` | 兩檔都提供相同的自動擴充 `AsyncQueue`；目前沒有主流程 import。保留較小且單一責任的 `async_queue.py`；`queue_ns_async.py`額外提供未被使用的 `SimpleQueue`，且 `task_done()` 是空實作。 |
+| MQTT | `mqtt_as.py` | `mqtt_async.py` | `communication/mqtt_client.py` 明確匯入 `mqtt_as.MQTTClient` 與 `mqtt_as.config`，目前主流程及文件均以此實作為準。`mqtt_async.py`沒有目前呼叫者，不能與現行 adapter 互換而不重新驗證 API 契約。 |
+
+整理原則是「保留目前實際 import 且有測試／文件契約的實作；沒有呼叫者的替代版本只封存，不讓它繼續進入裝置部署清單」。`lib_backup/` 只保存來源檔案，不應加入 ESP32 的最小部署內容。
+
 
 目前主流程：
 
@@ -128,7 +145,7 @@ flowchart LR
 - 使用 `microdot`，不是 `ESPWebServer.py`。
 - 實際使用 `mfrc522_async.py`、`aiot_tools.to_hex_string()`、`ssd1306.py` 與可選 `bitmap_font_tool.py`。
 - `aiot_tools.py` 的 LLM、新聞、音效等其他功能不是本專案已啟用的功能；目前只依賴其時間工具與 RFID 格式化工具。
-- `sounds.py`、`queue_ns_async.py`、`mfrc522_async_sync.py` 等檔案不在 `main.py` 的現行主流程中。
+- `lib_backup/` 內的 `queue_ns_async.py`、`mfrc522.py`、`mfrc522_async_sync.py` 與 `mqtt_async.py` 只是封存版本，不在 `main.py` 的現行主流程中，也不應上傳到裝置。
 
 原始碼目錄與 ESP32 實際部署的 import 路徑仍須另行驗證。尤其 `boot.py` 只反轉 `sys.path`，不會自動把缺少的套件路徑加入搜尋路徑。
 
@@ -138,11 +155,11 @@ flowchart LR
 
 | 元件 | GPIO／介面 | 目前用途 |
 |---|---|---|
-| RGB LED | R=37、G=35、B=33 | 3-bit 顏色輸出；由 `LedService` 唯一寫入。 |
+| RGB LED | R=37、G=35、B=33 | 3-bit 顏色輸出；由 `LedController` 唯一寫入。 |
 | 按鈕 1 | GPIO 17 | `Pin.IN`、`PULL_UP`；按下提交 LED `cycle` 命令。 |
 | 按鈕 2 | GPIO 21 | `Pin.IN`、`PULL_UP`；按下設定 MQTT 發佈事件。 |
 | DHT11 | GPIO 18 | 溫度／濕度量測與 RAM 快取。 |
-| TEMT 光感測器 | ADC GPIO 8 | ADC 原始值 0～4095；低光時提交 LED 警示。 |
+| TEMT 光感測器 | ADC GPIO 8 | ADC 原始值 0～4095；更新 `SensorSnapshot` 並提交低光命令。 |
 | PIR | GPIO 4 | 高電位表示移動；低到高時觸發音樂事件。 |
 | 無源喇叭 | GPIO 6 | PWM 播放 `MOTION_MELODY`。 |
 | OLED | I2C 0；SCL=7、SDA=5 | SSD1306，128×64；顯示時間與 DHT 資料。 |
@@ -181,7 +198,7 @@ LIGHT_POLL_INTERVAL_MS = 50
 2. ADC `< 1000` 且已 armed 時，提交 `low_light_alert`。
 3. ADC `>= 1100` 時重新 armed。
 4. 1000～1099 之間維持既有 armed 狀態。
-5. 警示期間由 `LedService` 保存原本的顏色／開關狀態，完成後還原。
+5. 警示期間由 `LedController` 保存原本的 desired／enabled 狀態，完成後還原。
 6. 警示完成前不接受一般 LED 命令。
 
 OLED 腳位、尺寸與字型路徑目前直接寫在 `hardware/display.py`；雖然設定範本也有對應欄位，顯示模組沒有完整使用那些欄位。
@@ -199,7 +216,7 @@ OLED 腳位、尺寸與字型路徑目前直接寫在 `hardware/display.py`；�
 7. 透過 `sync_time()` 優先使用 `ns_tools`，再嘗試 `aiot_tools`。
 8. 以 `broker='broker.emqx.io'` 建立 MQTT client，最多嘗試三次，每次間隔 2 秒；失敗仍繼續主流程。
 9. 嘗試建立 PIR 與喇叭；失敗時設定為 `None`，對應任務會跳過。
-10. 建立 `publish_event`、`motion_event`、`LedService`、LED owner 與 `motion_state`。
+10. 建立 `publish_event`、`motion_event`、`SensorSnapshot`、`LedController`、`CommandService` 與 `motion_state`。
 11. 將共享物件注入 `web_server.py` 的模組全域變數。
 12. 以 `uasyncio.gather()` 啟動 13 個應用協程。
 13. 正常流程持續運行；Web Server、背景任務或 MQTT 函式庫維持事件迴圈。
@@ -213,17 +230,17 @@ WiFi、NTP 與 DHT11 的底層操作可能是同步呼叫，會短暫占用協�
 
 | 任務 | 觸發／頻率 | 讀取 | 輸出／副作用 |
 |---|---|---|---|
-| `button1_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 1 | 提交 LED `cycle` 命令；LED busy 時消耗本次按下。 |
+| `button1_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 1 | 透過 `CommandService` 提交 LED `cycle` 命令。 |
 | `button2_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 2 | `publish_event.set()`。 |
-| `dht11_read_task` | 每 2 秒 | DHT11 | 更新溫度／濕度欄位。 |
-| `light_sensor_task` | 每 50 ms | ADC | 依雙門檻提交 `low_light_alert`。 |
-| `led_service.run()` | 每 20 ms frame | LED 命令佇列 | 唯一寫入 RGB LED；執行換色與閃爍效果。 |
+| `dht11_read_task` | 每 2 秒 | DHT11 | 更新 `SensorSnapshot`；失敗保留 last-good 並標示 quality／error。 |
+| `light_sensor_task` | 每 50 ms | ADC | 更新 `SensorSnapshot`，依雙門檻提交 `low_light_alert`。 |
+| `led_controller.run()` | 每 20 ms frame | 有界 LED 命令佇列 | 唯一寫入 RGB LED；執行 AUTO／MANUAL 仲裁與閃爍效果。 |
 | `rfid_read_task` | 每 500 ms | MFRC522 SPI | 更新最後成功 UID／時間，並保留最近5次成功讀卡。 |
 | `pir_monitor_task` | 每 100 ms | PIR GPIO | 非同步防抖：高電位穩定`PIR_HIGH_DEBOUNCE_MS`後觸發一次，低電位穩定`PIR_LOW_REARM_MS`後重新武裝。 |
 | `music_on_motion_task` | 等待 `motion_event` | 事件與喇叭 | 播放旋律；播放期間事件可能合併。 |
-| `oled_display_task` | 每 1 秒 | 時間、DHT RAM 快取 | 更新 OLED 兩行文字。 |
-| `mqtt_publish_task` | 等待 `publish_event` | DHT RAM 快取 | 發佈溫濕度文字 payload；完成後清除 Event。 |
-| `mqtt_subscribe_task` | 啟動時訂閱；之後每 10 秒休眠 | MQTT 指令 | 建立 LED 指令解析器，但 callback 目前未接通。 |
+| `oled_display_task` | 每 1 秒 | `SensorSnapshot` | 更新 OLED 兩行文字，不直接量測 DHT。 |
+| `mqtt_publish_task` | 等待 `publish_event` | `SensorSnapshot` | 發佈溫濕度文字 payload；完成後清除 Event。 |
+| `mqtt_subscribe_task` | 啟動時確認連線並訂閱；之後每 10 秒休眠 | MQTT 指令 | 解析 `led:4`／`led=4`，交給 `CommandService`。 |
 | `web_server_task` | 持續接收 HTTP | HTML 與共享物件 | 監聽 `0.0.0.0:80`。 |
 | `sensor_monitor_task` | 每 10 秒 | 無 | 目前只有休眠，是監控功能預留位置。 |
 
@@ -242,30 +259,30 @@ DHT11
   └→ mqtt_publish_task()
 ```
 
-DHT 讀取失敗時，`Dht11Sensor.measure()` 目前把欄位設為 `-1`。因此任務註解所說的「使用上次資料」與實際行為不一致；沒有獨立的 `valid`、`age`、`last_error` 快照。
+`Dht11Sensor.measure()` 失敗時保留最後有效值，並由 `SensorSnapshot` 記錄 `valid=False`、`quality=error`、`age_ms` 與 `error`；不再用 `-1` 作為通用故障值。
 
 ### 光感與 LED
 
 ```text
 TEMT ADC
   → light_sensor_task() 每 50 ms
-  → LedService.submit('low_light_alert', 'light')
-  → LedService.run() 每 20 ms
+  → CommandService.submit('low_light_alert', 'light')
+  → LedController.run() 每 20 ms
   → RgbLed.write()
 ```
 
-`GET /api/data` 會額外直接呼叫 `light_sensor.read()`，不是只讀取背景任務快取。亮度是原始 ADC 值，不是經校正的 lux。
+`GET /api/data` 只讀取 `SensorSnapshot`；不再由 HTTP handler 直接觸發 ADC 或 DHT。
 
 ### LED 命令來源
 
 ```text
 按鈕 1 ─┐
-Web API ─┼→ LedService.submit() → 有界命令佇列 → LedService.run() → RGB GPIO
+Web API ─┼→ CommandService → LedController → 有界命令佇列 → RGB GPIO
 光感 ───┤
-MQTT ───┘       （目前 MQTT callback 尚未接通）
+MQTT ───┘
 ```
 
-`LedService` 的重要不變條件：初始化完成後，只有 `run()` 可以寫入 RGB LED；生產者只能同步提交命令與取得 receipt。
+`LedController` 的重要不變條件：初始化完成後，只有 `run()` 可以寫入 RGB LED；所有 producer 只能透過 `CommandService` 提交命令與取得 receipt。
 
 ### 按鈕 2、Web 與 MQTT 發佈
 
@@ -308,7 +325,7 @@ MFRC522 SPI
 
 ### LED、RFID、移動偵測的 Web 顯示
 
-`LedService.snapshot()`提供`alert_flash_count`、`alert_flash_total`與`alert_flash_log`。低光警示每完成一組`LIGHT_ALERT_BLINK_COUNT`次閃紅才增加一次`alert_flash_count`，並以整組完成時間建立一筆`sequence`紀錄；未完整閃完的警示不計入。`alert_flash_log`保留最近5個完成事件，供`/api/data`與`/api/led/status`回傳。`index.html`以`閃紅序號：時間`逐行顯示。
+`LedController.snapshot()` 提供 `mode`、`desired_color`、`enabled`、`applied_output`、queue 狀態與警示紀錄。低光警示完成後恢復 desired state；前端透過 `/api/led/status` 讀取快速 RAM snapshot。
 
 `rfid_state.recent_reads`與`motion_state.recent_detections`都是裝置RAM的最近5筆快照。前端每次成功輪詢直接重繪三個區塊，不在瀏覽器另行累積；所以重新整理頁面不會恢復舊事件，裝置重啟也會清空這些紀錄。
 
@@ -320,10 +337,10 @@ MFRC522 SPI
 外部 MQTT client
   → nuu/csie/iot1133/cmd01
   → handle_cmd()
-  → LedService.submit('set_color', 'mqtt', value)
+  → CommandService.submit('set_color', 'mqtt', value)
 ```
 
-但目前 `MqttManager.subscribe()` 沒有保存或呼叫傳入的 `callback`，MQTT client 使用的是 `MqttManager.on_message()`，而該方法只列印訊息。因此這條路徑目前不能宣稱可用。
+`MqttManager.subscribe()` 保存並派送 callback；`handle_cmd()` 維持既有 wire format，解析後只呼叫 `CommandService.submit()`，不直接操作 LED。這完成 P1 的共同入口，但尚未包含重連後重新訂閱政策。
 
 ## 9. HTTP 與 MQTT 介面
 
@@ -340,7 +357,8 @@ MFRC522 SPI
 | POST | `/api/led/toggle` | 提交 LED `cycle` 命令；接受時回 HTTP 202，busy／queue full／stopped 依原因回 409／429／503。 |
 | GET | `/api/led/status` | 只回傳 LED RAM snapshot；不操作 ADC、DHT、SPI 或 GPIO；設定 `Cache-Control: no-store`。 |
 | GET | `/api/led/commands/<id>` | 查詢有限結果歷史；過期或不存在時回 404。 |
-| POST | `/api/publish` | 設定 MQTT 發佈事件，立即回應，不等待 MQTT 發佈完成。 |
+| POST | `/api/publish` | 設定 MQTT 發佈事件；連線可用時回 `202` 與 `status: accepted`，不等待 MQTT 發佈完成。 |
+| GET | `/api/publish/status` | 回傳最近一次發佈的 `idle`、`accepted`、`publishing`、`published`、`failed` 或 `unavailable` 狀態；設定 `Cache-Control: no-store`。 |
 | GET | `/api/status` | 目前固定回傳 `status: ok` 與 `System running`，不代表所有服務健康。 |
 
 目前沒有認證、HTTPS、WebSocket或SSE。前端以`/api/data`取得溫濕度、光照與RFID，另以`/api/motion/status`每1000 ms取得PIR／喇叭RAM快照，LED則使用快速`/api/led/status`路徑。HTTP API在同網段內可直接被呼叫，後端仍是控制權威，前端提示不能取代後端busy／輸入檢查。
@@ -457,7 +475,7 @@ assets/uplot/1.6.32/LICENSE
 | QoS | 應用呼叫均為 0。 |
 | Payload | 裝置名稱加溫度／濕度的 UTF-8 人類可讀文字，不是 JSON schema。 |
 | 發佈觸發 | 實體按鈕 2 或 Web `/api/publish`。 |
-| 入站 LED | 設計上支援 `led:4`／`led=4`，但目前 callback 未接通。 |
+| 入站 LED | 支援 `led:4`／`led=4`；同步 callback 解析後交給 `CommandService`，不直接操作 GPIO。 |
 
 `config.py` 的萬用訂閱 `nuu/csie/iot1133/#` 目前沒有被使用；`DEVICE_ID` 沒有傳給 MQTT client 作為 client ID；`MQTT_PORT` 與重連退避欄位也未由 `MqttManager` 明確套用，實際重連依 `mqtt_as` 行為。
 
@@ -467,15 +485,15 @@ assets/uplot/1.6.32/LICENSE
 
 | 項目 | 程式證據與影響 |
 |---|---|
-| MQTT callback 未接通 | `MqttManager.subscribe(..., callback=handle_cmd)` 的 callback 參數被忽略；`on_message()` 只列印訊息，因此遠端 LED 指令目前不會進入 `LedService`。 |
-| MQTT callback 契約需確認 | `mqtt_as` 的收訊 callback 呼叫型態與目前 async 定義仍需依實際函式庫版本確認；同步／非同步不一致可能使回呼不執行。 |
-| 重連後未重新訂閱 | `on_connected()` 只設定旗標與 Event，沒有明確重新訂閱命令 topic 的應用邏輯。 |
-| 連線狀態可能過期 | `_connected` 與 connected Event 沒有完整涵蓋非預期斷線；發佈／訂閱任務也沒有把 `wait_connected()` 的 False 狀態轉成 Web 健康狀態。 |
-| DHT 失敗值混入資料 | `measure()` 失敗時以 `(-1, -1)` 覆寫欄位，沒有保留最後成功資料與資料品質／新鮮度。 |
-| HTTP 成功語意過度 | `/api/publish` 設定 Event 後即回成功，不等於 MQTT 已送出；LED 202 也只表示命令 accepted，不表示 GPIO 已 executed。 |
+| MQTT callback 已接通 | `MqttManager.on_message()` 符合 `mqtt_as` 的同步三參數契約，派送至 handler；handler 再呼叫 `CommandService.submit()`。 |
+| MQTT callback 契約已以本地函式庫確認 | `lib/mqtt_as.py` 的收訊路徑直接呼叫 `subs_cb(topic, msg, retained)`；桌面 fake client 測試覆蓋同步派送。 |
+| 重連後未重新訂閱 | `on_connected()` 目前設定旗標與 Event，但沒有明確重新訂閱命令 topic 的應用邏輯。 |
+| 連線狀態可能過期 | `_connected` 與 connected Event 已在 adapter 連線／失聯檢查中互相更新；仍未形成完整的 Web 健康狀態或 supervisor。 |
+| DHT 失敗值與品質已分離 | `Dht11Sensor` 保留 last-good；`SensorSnapshot` 另外記錄 valid／quality／age／error。 |
+| HTTP 發佈語意已分層 | `/api/publish` 只回 `accepted`／`unavailable`；`/api/publish/status` 另回背景任務的 `publishing`／`published`／`failed`，但 QoS0 不保證 Broker ACK，且 Event 仍可能合併。 |
 | Web 健康檢查為占位 | `/api/status` 固定回 `ok`；`sensor_monitor_task()` 只有 sleep，不能代表 WiFi、MQTT、DHT、RFID 或 LED owner 健康。 |
 | LED 命令 Event 可能合併 | `publish_event` 是單一旗標，不保存觸發次數；發佈期間的新事件可能被後續 `clear()` 合併或消除。 |
-| Web 感測查詢會直讀 ADC | `/api/data` 直接呼叫 `light_sensor.read()`，與每 50 ms 的光感任務分開取樣；亮度沒有時間戳與品質資訊。 |
+| Web 感測查詢只讀快照 | `/api/data` 讀 `SensorSnapshot`，不直接呼叫 ADC 或 DHT；感測任務負責更新資料。 |
 | 任務沒有統一 supervisor | 個別任務多半捕捉例外後繼續，但必要任務若退出，主系統仍可能繼續運作而沒有明確告警。 |
 | 設定未完全集中 | OLED 腳位／尺寸／字型路徑寫在 `hardware/display.py`；Broker 由 `main.py` 直接指定；MQTT port 與退避設定未完整套用。 |
 | 部署相依仍需驗證 | Microdot、`mqtt_as`、`ssd1306`、RFID 驅動、字型與 import path 必須依實際 MicroPython 檔案系統確認。 |
@@ -483,7 +501,7 @@ assets/uplot/1.6.32/LICENSE
 | 機密與存取控制不足 | WiFi profiles 為本機設定；HTTP 無驗證；MQTT 使用公開 TCP 1883、共用 topic，沒有帳密與 TLS。 |
 | 關閉流程不完全一致 | 一般例外會嘗試斷開 MQTT；`KeyboardInterrupt` 路徑主要停止 LED，所有網路／Web 資源沒有一致的 shutdown protocol。 |
 
-以上限制是依目前程式碼的靜態分析；除下方桌面測試外，未宣稱已在 ESP32 實機重現。若要修正，建議順序為：先固定部署與 import 路徑，再完成 MQTT callback／重連契約，接著明確化感測快照與 API 完成語意，最後補齊健康監控、安全邊界與任務 supervisor。
+以上限制是依目前程式碼的靜態分析；除下方桌面測試外，未宣稱已在 ESP32 實機重現。P1 已完成 SensorSnapshot、CommandService、LedController 與三個命令來源遷移；下一步優先完成重連後重新訂閱，再補齊健康監控、安全邊界與任務 supervisor。
 
 ## 11. 部署架構與實機檢核
 
@@ -526,7 +544,7 @@ assets/uplot/1.6.32/LICENSE
 3. 單獨確認 RGB LED、兩個按鈕、DHT11、ADC、PIR、喇叭、OLED 與 RFID。
 4. 確認 WiFi IP、NTP 校時與同網段瀏覽器可連接 HTTP 80。
 5. 確認 `/api/data`、`/api/led/status`、LED 命令與命令結果查詢。
-6. 以外部 MQTT client 驗證溫濕度 payload；入站 LED 指令必須先完成 callback 修正再驗證。
+6. 以外部 MQTT client 驗證溫濕度 payload 與 `led:4`／`led=4` 入站指令；目前桌面測試已確認 adapter 派送，但尚未宣稱真 Broker／ESP32 實機通過。
 7. 驗證斷網／重連、感測失敗、按鈕連按、低光遲滯、LED 警示期間命令競爭與 Web／MQTT 完成語意。
 
 ## 12. 教學主題對應
@@ -538,7 +556,7 @@ assets/uplot/1.6.32/LICENSE
 | GPIO 與位元運算 | RGB 3-bit 色碼、上拉輸入、低電位按鈕與安全輸出。 |
 | 感測與資料品質 | DHT 快取、ADC 原始值、PIR 邊緣與最近5次時間、RFID 最後成功快照與最近5次讀卡狀態。 |
 | 去彈跳與遲滯 | 按鈕穩定檢查、ADC 1000／1100 雙門檻、避免低光重複觸發。 |
-| 控制權與仲裁 | `LedService` 單一 owner、命令 receipt、busy、有限佇列與警示優先權。 |
+| 控制權與仲裁 | `LedController` 單一 owner、命令 receipt、busy、有限佇列與警示優先權。 |
 | 非同步與事件 | `gather`、`sleep`、`Event`、協同多工、事件合併與同步阻塞操作。 |
 | 顯示與字型 | I2C、SSD1306、點陣中文字型與簡化字型降級。 |
 | 網路與時間 | WiFi profile、NTP、UTC+8、牆上時間與裝置運行時間的差異。 |
