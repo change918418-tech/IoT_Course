@@ -16,14 +16,14 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
-## CHG-20261013-030｜將輪次備份納入 Git 版控並準備推送 main
+## CHG-20261013-030｜將輪次備份納入 Git 版控並推送 main
 
 - **類別：**需求變更（版控規則與教學資料）。
 - **日期／紀錄時間：**2026-10-13 12:19:06 +08:00，工具取得台北時間。
 - **原因：**`mdy_01/`、`mdy_02/` 原本只作本機回復快照，學生無法從 Git 歷史取得修改前版本比較；使用者要求將不含秘密的輪次備份納入版控，並將已 merge 的 `main` 推送到 `origin`。
 - **作法：**更新 `GIT_VERSION_CONTROL.md`，規定 `mdy_N/` 公開快照應納入 Git、不得部署到 ESP32、不得包含私人設定或秘密，且與該輪程式變更及 `ChangeLog.md` 一起提交；檢查 `mdy_01/`、`mdy_02/` 僅含公開程式、測試與 `config.example.py` placeholder，未加入私人 `config.py`。本次將兩個備份目錄與版控規則、ChangeLog 建立 commit，之後推送 `main` 到 `origin`。
 - **影響：**學生可在 Git 中比較 `mdy_01/`、`mdy_02/` 與後續主流程；備份檔仍只是來源快照，不屬於 ESP32 部署清單。`.manus/`、`manus-slides/`、PPTX 等既有未追蹤項目不納入。
-- **驗證：**備份內容已檢查未發現私人 `config.py`、WiFi profiles、token、密碼或金鑰；`GIT_VERSION_CONTROL.md` 與 `ChangeLog.md` 的 staged diff check 通過。`mdy_N/` 保留原始來源快照，因此其中既有檔案的 trailing whitespace 未被重排；完整 staged diff check 會列出這些歷史空白，但不代表本次新增規則文件產生格式錯誤。commit、merge 與 push 結果待本回合後續指令完成後補記實際 hash 與遠端驗證。
+- **驗證：**備份內容已檢查未發現私人 `config.py`、WiFi profiles、token、密碼或金鑰；`GIT_VERSION_CONTROL.md` 與 `ChangeLog.md` 的 staged diff check 通過。`mdy_N/` 保留原始來源快照，因此其中既有檔案的 trailing whitespace 未被重排；完整 staged diff check 會列出這些歷史空白，但不代表本次新增規則文件產生格式錯誤。已建立備份與版控 commit `af2770b`，merge commit `305c876` 已在其祖先歷史中；`origin/main` 已驗證為 `af2770b`（2026-10-13 12:20:33 +08:00）。commit／merge／push 均完成。
 - **部署／回復：**不部署 `mdy_01/`、`mdy_02/`；回復程式時可從對應輪次快照取回修改前檔案。版控規則或備份提交若需撤回，使用 Git revert，不刪除學生比較所需的歷史。
 
 ## CHG-20261013-029｜擴充 MQTT 同步 callback 詳細教材
