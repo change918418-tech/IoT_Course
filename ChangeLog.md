@@ -16,6 +16,408 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261013-029｜擴充 MQTT 同步 callback 詳細教材
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-10-13 10:47:20 +08:00，工具取得台北時間。
+- **原因：**前一版已補上同步 callback 的結論與責任邊界，但說明過於濃縮，未充分交代原始錯誤如何形成、`async def` 呼叫後為何只得到 coroutine、handler 為何會在 adapter 斷路、命令受理與 LED 套用為何不是同一時間點；學生缺少完整的因果鏈就難以自行診斷類似問題。
+- **作法：**擴充 `IOT_ARCHITECTURE_EVOLUTION.md` 的 S2 段落，加入原始事故、同步／非同步呼叫對照、錯誤與修正路徑、handler 保存原因、callback 工作範圍、完成階段、`wait_connected()` 邊界、測試證據與學生檢查問題；擴充 `SYSTEM_ARCHITECTURE.md`，以 `led:4` 逐步追蹤 Broker、`mqtt_as`、adapter、`tasks.py`、`CommandService` 與 `LedController`；擴充 `IOT_ARCHITECTURE_TECH_TREE.md` E02，改以契約推導 adapter 並連結物聯網的網路／時間／資源／硬體驗證差異。未修改程式、設定、API 或部署清單。
+- **影響：**教材現在同時說明「發生了什麼」、「為什麼會發生」、「修正放在哪一層」及「測試能證明什麼」，不再只給同步 callback 的規則結論。
+- **驗證：**以 Mermaid 11.13.0 實際解析三份修改文件的全部 Mermaid 區塊：`IOT_ARCHITECTURE_EVOLUTION.md` 4/4、`SYSTEM_ARCHITECTURE.md` 1/1、`IOT_ARCHITECTURE_TECH_TREE.md` 1/1，共 6/6 通過；`python -B -m unittest tests.test_mqtt -v` 通過 10/10，`python -B -m unittest discover -s tests -v` 通過 33/33，`git diff --check` 通過。未進行 ESP32 實機、真 Broker 或外部訂閱者端到端驗證。
+- **部署／回復：**只需同步三份 Markdown 文件與 `ChangeLog.md`，不需上傳 ESP32。回復時移除本紀錄及本回合新增段落；不得覆蓋私人 `config.py`。
+
+## CHG-20261013-028｜補充 MQTT 同步 callback 教材說明
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-10-13 10:26:00 +08:00，工具取得台北時間。
+- **原因：**既有文件已記錄 `mqtt_as` 的同步 callback 修正，但尚未完整說明同步呼叫契約、`async def` 未被 `await` 時只產生 coroutine、adapter 保存 handler、callback 與命令完成語意的差異；學生容易把「收到 callback」誤認為「命令已執行」。
+- **作法：**在 `IOT_ARCHITECTURE_EVOLUTION.md` 的 S2 P0 演進段落新增同步 callback 的契約、錯誤示例、bridge 邊界、handler 保存、快速派送與 fake MQTT 驗證方式；在 `SYSTEM_ARCHITECTURE.md` 新增目前實作的 callback 責任表與 `wait_connected()`／重連重新訂閱界線；在 `IOT_ARCHITECTURE_TECH_TREE.md` 的 E02 MQTT 節點加入第一性原理與測試教學交叉連結。未修改程式、設定、API 或部署清單。
+- **影響：**MQTT 教材可區分底層同步 callback、非同步 task 排程、命令受理與 LED 套用；讀者也能理解訂閱 callback 保存與重連恢復是兩個不同問題。
+- **驗證：**以 Mermaid 11.13.0 實際解析三份修改文件的全部 Mermaid 區塊：`IOT_ARCHITECTURE_EVOLUTION.md` 4/4、`SYSTEM_ARCHITECTURE.md` 1/1、`IOT_ARCHITECTURE_TECH_TREE.md` 1/1，共 6/6 通過；`python -B -m unittest tests.test_mqtt -v` 通過 10/10，`python -B -m unittest discover -s tests -v` 通過 33/33，`git diff --check` 通過。未進行 ESP32 實機、真 Broker 或外部訂閱者端到端驗證。
+- **部署／回復：**只需同步三份 Markdown 文件與 `ChangeLog.md`，不需上傳 ESP32。回復時移除本紀錄及三份文件新增段落；不得覆蓋私人 `config.py`。
+
+## CHG-20261012-027｜新增物聯網軟體架構演進教學文件
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-10-12 22:01:27 +08:00，工具取得台北時間。
+- **原因：**既有 `IOT_ARCHITECTURE_TECH_TREE.md` 說明技術能力與第一性原理，但學生仍需要一份沿著本專案歷史，理解「原始直接控制」如何因控制競爭、感測品質、MQTT 契約、資源限制與部署差異逐步演進的教材；也需要明確比較物聯網軟體架構與純軟體架構的核心差異。
+- **作法：**新增 `IOT_ARCHITECTURE_EVOLUTION.md`，依 S0 原始版本、S1 模組化基線、S2 P0 MQTT 修正、S3 P1 命令／感測架構與 S4 P2 待實作方向整理演進；逐項說明狀態擁有權、協同多工、去彈跳與遲滯、`SensorSnapshot`、callback bridge、accepted／applied、`CommandService`、`LedController`、bounded queue、request ID、部署相依、連線恢復、監督與安全的「是什麼、為什麼、做什麼、怎麼做」；另以表格與 Mermaid 圖比較物理閉環、時間、資源、網路、部署與驗證差異。
+- **影響：**新增一份以目前程式與歷史變更為證據的架構演進教材；不修改韌體、設定、API 或部署檔案。文件明確區分 P1 已實作、P2 待實作，以及桌面測試與 ESP32 實機驗證的界線。
+- **驗證：**以 Mermaid 11.13.0 實際解析 `IOT_ARCHITECTURE_EVOLUTION.md` 的 4/4 個圖表區塊；其餘 Python／Node 測試沿用前一個程式變更回合的已驗證結果，本次未修改程式。
+- **部署／回復：**本次只新增教學文件與本紀錄，不需重新上傳 ESP32。回復時移除 `IOT_ARCHITECTURE_EVOLUTION.md` 與本紀錄段落；不得回復或覆蓋私人 `config.py`。
+## CHG-20261012-026｜同步 LED 講義與裝置私人配置至 P1
+
+- **類別：**需求變更（文件與裝置部署配置同步）。
+- **日期／紀錄時間：**2026-10-12 20:44:01 +08:00，工具取得台北時間。
+- **原因：**P1 已將舊 `LedService` 介面替換為 `CommandService`／`LedController`，但 `LED_SINGLE_OWNER_GUIDE.md` 與 `LIGHT_LED_ALERT_GUIDE.md` 仍有舊版 token、事件任務、MQTT callback 未接通及部署清單描述；私人 `config.py` 也缺少新的 `LED_CONTROL_MODE` 設定，無法直接以目前 P1 程式配置部署。
+- **作法：**更新兩份 LED 講義，將目前實作改以 `SensorSnapshot`、`CommandService`、`LedController`、MQTT callback bridge、命令 receipt、bounded queue、AUTO／MANUAL、Web 快照與目前部署清單為準；未實作的按鈕 3 綠閃保留並明確標示為提案。更新本機私人 `config.py`，新增 `LED_CONTROL_MODE = 'AUTO'`，保留原有 WiFi SSID／密碼及裝置專屬 `LIGHT_ALERT_TRIGGER_ADC = 500` 校準值；公開 `config.example.py` 的 placeholder WiFi 與 1000／1100 範例值不被私人設定覆蓋。
+- **影響：**ESP32 可直接上傳目前 P1 程式與本機 `config.py`；WiFi／密碼仍保留。私人 `config.py` 仍被 Git 忽略，不納入 commit、備份或公開文件；`mdy_01/`、`mdy_02/` 與 `lib_backup/` 不屬於 ESP32 部署檔案。
+- **驗證：**私人配置匯入檢查確認 `LED_CONTROL_MODE = 'AUTO'` 且 WiFi profiles／裝置專屬 500／1100 閾值未被替換；Python unittest 33/33 通過；`node tests/test_led_polling.cjs`、`node tests/test_rfid_ui.cjs` 通過；指定 Python 檔案 `py_compile` 通過；LED 講義 Mermaid 11.13.0 實際解析 `LED_SINGLE_OWNER_GUIDE.md` 21/21，`LIGHT_LED_ALERT_GUIDE.md` 0 個，共 21/21 通過。未進行 ESP32 實機、真 Broker、外部訂閱者或硬體 GPIO 電氣驗證。
+- **部署／回復：**部署 `main.py`、`tasks.py`、`web_server.py`、`index.html`、`hardware/led.py`、`hardware/sensors.py`、`communication/mqtt_client.py`、`services/command_service.py`、`services/led_controller.py`、`services/sensor_snapshot.py`、`config.py` 與必要的 `lib/` 檔案；不要部署 `mdy_01/`、`mdy_02/`、`lib_backup/`。回復時還原兩份講義與 `config.py` 的 `LED_CONTROL_MODE`，並保留私人 WiFi／密碼。
+
+## CHG-20261012-025｜實作 P1 SensorSnapshot、CommandService 與 LedController
+
+- **類別：**需求變更（P1 核心架構改善）。
+- **日期／紀錄時間：**2026-10-12 16:53:00 +08:00，工具取得台北時間。
+- **原因：**P0 已修復 MQTT callback 與發佈狀態語意，但按鈕、Web、MQTT、光感仍需要以一致的 LED 命令邊界與狀態模型協作；感測資料也需要與硬體讀取解耦，避免 Web／OLED／MQTT 各自讀取或重複觸發感測器。
+- **作法：**新增 `services/sensor_snapshot.py`，集中保存溫度、濕度、光照的 last-good value、valid、quality、age、error 與 sample sequence；新增 `services/command_service.py`，產生遞增 request ID 並提供共同命令入口；以 `services/led_controller.py` 取代 `services/led_service.py`，成為唯一 LED GPIO owner，建立 bounded queue／result history、desired／enabled／applied 分離、AUTO／MANUAL 模式、低光警示保存／恢復與命令 receipt。更新 `main.py` 組裝並注入三個核心服務；更新 `tasks.py` 將按鈕、光感與 MQTT 訂閱遷移到 CommandService，DHT／光感 producer 更新 SensorSnapshot，且光感讀值失敗或未知時不提交 LED 警示命令，OLED／MQTT 發佈讀取快照；更新 `web_server.py` 讓 `/api/data` 只讀快照，LED toggle、canonical commands、mode、status、result 路由共用 CommandService。更新 `hardware/sensors.py` 保留感測 last-good 值與錯誤；更新 `config.example.py` 的 `LED_CONTROL_MODE`；刪除舊 `services/led_service.py`。保留 MQTT 既有 `led:4`／`led=4` payload 邊界，未在本次加入重連重新訂閱、權限／TLS、Broker ACK 或 supervisor。
+- **輪次備份：**在本回合任何既有程式檔案修改前建立 `mdy_02/`，保存本回合涉及的 `main.py`、`tasks.py`、`web_server.py`、`config.example.py`、`hardware/sensors.py`、`hardware/led.py`、`services/led_service.py` 與既有測試原始版本；未備份私人 `config.py`，未建立或覆蓋 `mdy_03/`。新增的 P1 核心檔案與測試沒有「修改前既有版本」。
+- **影響：**四個 LED 命令來源共用 request ID、輸入驗證、有限佇列與結果語意；owner frame 以外不直接寫 GPIO。光感 AUTO 低光警示完成後恢復使用者 desired state，MANUAL 拒絕光感覆蓋；感測失敗不再以 `-1` 覆蓋 last-good value，而由 Snapshot 明確表達品質與年齡，未知光感值也不會觸發控制命令。Web 仍保留舊 LED toggle 與 MQTT wire format，HTTP `202` 僅代表命令已受理。
+- **文件：**同步更新 `IOT_ARCHITECTURE_TECH_TREE.md`、`SYSTEM_ARCHITECTURE.md`、`WEB_UI_EXECUTION_GUIDE.md`，將 P1 實作狀態、資料／命令流、歷史 P0 討論與驗收界線分開記錄。
+- **驗證：**`python -B -m unittest discover -s tests -v` 通過 33/33；`node tests/test_led_polling.cjs` 通過；`node tests/test_rfid_ui.cjs` 通過；指定 P1 Python 檔案 `py_compile` 通過。桌面 fake GPIO／fake MQTT／Microdot TestClient 已覆蓋單一 owner、AUTO 警示恢復、MANUAL 拒絕、last-good snapshot、未知光感不提交警示、bounded queue、request ID、Web command result 與 MQTT command adapter。Mermaid 11.13.0 實際解析 `IOT_ARCHITECTURE_TECH_TREE.md` 1/1、`SYSTEM_ARCHITECTURE.md` 1/1、`WEB_UI_EXECUTION_GUIDE.md` 12/12，共 14/14 個 Mermaid 區塊通過。未進行 ESP32 實機、真 Broker、外部訂閱者或硬體 GPIO 電氣驗證。
+- **部署／回復：**部署 `main.py`、`tasks.py`、`web_server.py`、`hardware/sensors.py`、`hardware/led.py`、`config.example.py`、`services/command_service.py`、`services/sensor_snapshot.py`、`services/led_controller.py`、對應 `tests/` 與文件；不要部署 `mdy_02/`，不要覆蓋私人 `config.py`。回復時以 `mdy_02/` 對應快照還原既有檔案，並移除本回合新增服務／測試；若回復至 P0，需同步恢復 `services/led_service.py` 及其呼叫者契約。
+
+## CHG-20261012-024｜實作 P0 MQTT callback、指令派送與發佈狀態語意
+
+- **類別：**BUG（MQTT 入站 callback 斷路、連線結果未檢查、HTTP 發佈完成語意錯誤）。
+- **日期／紀錄時間：**2026-10-12 15:43:08 +08:00，工具取得台北時間。
+- **原因：**`lib/mqtt_as.py` 以同步三參數呼叫收訊 callback，但 adapter 原本使用非同步 `on_message()`；訂閱時傳入的 callback 未被保存；MQTT 任務忽略 `wait_connected()`；`POST /api/publish` 將 Event 受理誤報成已完成發佈，且前端只依 HTTP 成功顯示已發布。
+- **作法：**修改 `communication/mqtt_client.py`：建立同步 callback bridge、保存並派送訂閱 handler、以連線 callback／Event確認 `wait_connected()`、追蹤發佈 `accepted`／`publishing`／`published`／`failed`／`unavailable`。修改 `tasks.py`：訂閱 callback 維持既有 `led:4`／`led=4` 格式，解析後交給 `LedService.submit()`；發佈任務檢查連線並更新結果。修改 `web_server.py`：`/api/publish` 回傳 JSON 與 HTTP 202／503，新增 no-store 的 `/api/publish/status`。修改 `index.html`：依 JSON status 顯示「已受理」或錯誤，不把 accepted 宣稱成完成。同步更新 `IOT_ARCHITECTURE_TECH_TREE.md`、`SYSTEM_ARCHITECTURE.md`、`WEB_UI_EXECUTION_GUIDE.md`。未修改 `lib/mqtt_as.py`，未提前建立 P1 完整 `CommandService`。
+- **輪次備份：**在本回合程式修改前建立 `mdy_01/`，保存 `communication/mqtt_client.py`、`tasks.py`、`web_server.py`、`index.html` 與 `tests/test_mqtt.py` 的修改前版本；不含私人設定與秘密。下次程式修改輪次應使用 `mdy_02/`。
+- **影響：**MQTT 入站 LED 指令現在到達既有單一 `LedService.submit()` 受理邊界；HTTP 發佈可區分受理與背景任務最近結果；既有 MQTT payload 格式與 QoS 0 不變。Event 仍是單一旗標，重複觸發可能合併；重連後重新訂閱、完整 P1 `CommandService`、Broker ACK 與權限安全仍未納入。
+- **驗證：**MQTT 專項測試 10/10 通過；完整 Python 測試 33/33 通過；`node tests/test_led_polling.cjs` 與 `node tests/test_rfid_ui.cjs` 通過；`python -B -m py_compile communication/mqtt_client.py tasks.py web_server.py tests/test_mqtt.py` 通過；Mermaid 11.13.0 實際解析 `IOT_ARCHITECTURE_TECH_TREE.md` 1/1、`SYSTEM_ARCHITECTURE.md` 1/1、`WEB_UI_EXECUTION_GUIDE.md` 12/12；`git diff --check` 無差異錯誤；桌面 fake MQTT／fake LED 已確認同步 callback、`LedService.submit()` 派送、連線逾時與 HTTP JSON 狀態分層。ESP32 實機、真 Broker、外部訂閱者與斷線重連尚未驗證。
+- **部署／回復：**部署 `communication/mqtt_client.py`、`tasks.py`、`web_server.py`、`index.html`，並依專案既有部署清單重啟裝置；不部署 `mdy_01/`。回復時以 `mdy_01/` 對應快照還原上述檔案，或使用 Git 差異回復；不要覆蓋私人 `config.py`。
+
+## CHG-20261012-023｜記錄 P0 MQTT 與 P1 共用命令入口討論及程式輪次備份規則
+
+- **類別：**需求變更（架構決策與版控流程）。
+- **日期／紀錄時間：**2026-10-12 15:29:46 +08:00，工具取得台北時間。
+- **原因：**兩輪討論釐清IOT架構技術樹P0的MQTT修正邊界，以及是否要提前導入P1的MQTT／Web／按鈕共用命令入口；同時使用者要求未來每一輪程式修改先保存原始版本，依序放入`mdy_01`、`mdy_02`等目錄。
+- **討論紀錄：**第一輪確認目前`mqtt_as`以同步方式呼叫`subs_cb(topic, msg, retained)`，但`MqttManager.on_message()`為非同步函式；`MqttManager.subscribe()`忽略傳入callback；MQTT任務忽略`wait_connected()`結果；`POST /api/publish`把事件觸發誤報為資料已發佈。第二輪決定P0只修正callback bridge、指令派送、連線結果及accepted／published／failed語意，保留現行`lib/mqtt_as.py`，並讓MQTT指令進入既有`LedService.submit()`；P1才建立完整`CommandService`，一次遷移按鈕、Web與MQTT，避免P0形成半套第二命令入口。
+- **作法：**將上述兩輪討論詳記於`IOT_ARCHITECTURE_TECH_TREE.md`的P0／P1段落；將程式修改前的輪次備份規則加入`GIT_VERSION_CONTROL.md`。第一次程式修改回合使用`mdy_01/`，下一回合使用`mdy_02/`，備份保留相對路徑且排除私人`config.py`與所有秘密。本次只有文件修改，尚未建立`mdy_01/`，也未修改程式。
+- **影響：**後續P0實作必須以`LedService.submit()`作為現有單一LED命令受理邊界，不得由MQTT callback直接寫GPIO或複製仲裁政策；P1再引入完整`CommandService`。每一輪程式修改均可由對應`mdy_N/`回復，且封存備份不得部署到ESP32。
+- **驗證：**已檢查文件內容與目前P0／P1方案一致；`git diff --check`無差異錯誤；Mermaid 11.13.0實際解析`IOT_ARCHITECTURE_TECH_TREE.md`的1/1個圖表區塊；本次未修改程式，因此不宣稱完成MQTT修正，也未建立`mdy_01/`，未執行程式測試。
+- **部署／回復：**本次只納入文件變更，不需上傳ESP32。回復時還原`IOT_ARCHITECTURE_TECH_TREE.md`、`GIT_VERSION_CONTROL.md`與`ChangeLog.md`本次段落；未來程式回合須先備份再修改，回復優先使用對應`mdy_N/`快照。
+
+## CHG-20261012-022｜整理 lib 重複函式庫並建立封存目錄
+
+- **類別：**需求變更（架構與部署結構）。
+- **日期／紀錄時間：**2026-10-12 14:49:29 +08:00，工具取得台北時間。
+- **原因：**`lib/`同時存在3個MFRC522、2個Queue與2個MQTT實作；多份可替代模組會讓部署選擇、import 路徑與後續架構調整的基線不明。
+- **作法：**保留`lib/mfrc522_async.py`、`lib/async_queue.py`與`lib/mqtt_as.py`；建立`lib_backup/`，將`mfrc522.py`、`mfrc522_async_sync.py`、`queue_ns_async.py`與`mqtt_async.py`移入封存。更新`SYSTEM_ARCHITECTURE.md`的目錄、部署清單與選擇理由；未修改目前主流程的import。
+- **選擇理由：**RFID保留`mfrc522_async.py`，因`hardware/rfid.py`明確使用`MFRC522Async`及非同步`request`／`anticoll`，且測試契約相同；Queue保留較小且單一責任的`async_queue.py`，兩者目前都無呼叫者，而`queue_ns_async.py`額外含未使用且`task_done()`為空實作的`SimpleQueue`；MQTT保留`mqtt_as.py`，因`communication/mqtt_client.py`明確匯入其`MQTTClient`與`config`，是現行主流程契約。
+- **影響：**目前裝置程式的有效函式庫集合只保留上述三個檔案；封存檔不應上傳ESP32。既有RFID、MQTT與桌面測試的import路徑不變；Queue仍未接入目前主流程。
+- **驗證：**靜態分析確認現行程式沒有引用移入封存的模組；檢查確認`lib/`保留3個指定模組且`lib_backup/`存在4個封存檔；`python -B -m unittest discover -s tests -v`通過24/24；`git diff --check`無差異錯誤；Mermaid 11.13.0實際解析`SYSTEM_ARCHITECTURE.md`與`IOT_ARCHITECTURE_TECH_TREE.md`共2/2個圖表區塊。未進行ESP32實機部署或讀卡／Broker端到端驗證。
+- **部署／回復：**部署時只帶`lib/`內仍被主流程需要的檔案，不上傳`lib_backup/`。回復時可將封存檔移回`lib/`，但恢復任何替代MQTT／RFID實作前必須重新確認import與API契約；不覆蓋私人`config.py`。
+
+## CHG-20261012-021｜以第一性原理重整完整技術樹六問格式
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-10-12 13:02:37 +08:00，工具取得台北時間。
+- **原因：**既有技術樹已涵蓋物聯網架構能力，但每個節點的欄位名稱使用「使用時機」，未完全對齊使用者要求的「使用前提、使用情境、是什麼、為什麼、做什麼、怎麼做」六問格式；文件開頭也未明確說明技術點／知識點及提案與現況的界線。
+- **作法：**重整`IOT_ARCHITECTURE_TECH_TREE.md`標題與導言，明確由物理限制、時間、資源、信任與可驗證性推導A01～H04共32個技術點／知識點；將全部32個節點的欄位統一為六問格式，並補充每一欄的閱讀定義與尚未部署的提案標示原則。未修改韌體、設定、API或測試程式。
+- **影響：**學生可依A→H閱讀完整技術樹，逐點回答採用條件、問題情境、概念定義、必要性、責任與實作方式；既有系統架構與程式行為不變。
+- **驗證：**已以Mermaid 11.13.0實際解析`IOT_ARCHITECTURE_TECH_TREE.md`的1/1個圖表區塊；已檢查32個節點均具有六個欄位，且不再使用`使用時機`欄位；`git diff --check`無差異錯誤；`python -B -m unittest discover -s tests -v`通過24/24。未進行ESP32實機驗證。
+- **部署／回復：**只需納入`IOT_ARCHITECTURE_TECH_TREE.md`與`ChangeLog.md`，不需重新上傳ESP32。回復時還原這兩個文件的本次變更；不應回復或覆蓋私人`config.py`。
+
+## CHG-20261012-020｜縮短PIR重新武裝等待
+
+- **類別：**BUG（實機已能偵測並播放，但下一次移動需等待過久）。
+- **日期／紀錄時間：**2026-10-12 01:52:10 +08:00，工具取得台北時間。
+- **原因：**上一版`PIR_LOW_REARM_MS = 5000`要求PIR低電位連續穩定5秒後才重新武裝，因此一次事件結束後的下一次偵測會顯得遲鈍。
+- **作法：**將私人`config.py`與公開`config.example.py`的`PIR_LOW_REARM_MS`由5000調整為1500 ms；`tasks.py`缺少設定時的預設值同步調整為1500。保留100 ms輪詢與200 ms高電位確認，仍以穩定低電位重新武裝，避免退回500 ms時較容易出現同一次靠近重複觸發的問題；同步更新兩份架構文件。
+- **影響：**PIR在低電位穩定1.5秒後可再次偵測；短暫低／高抖動仍不會重新計數。1500 ms是防重複與回應速度的折衷值，若實機模組仍有分離脈衝，需再依波形或實測調整。
+- **驗證：**PIR專項測試6/6通過；完整Python測試24/24通過；前端LED／RFID／移動狀態測試通過；指定Python檔案`py_compile`通過；Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過；`git diff --check`無差異錯誤。測試驗證穩定低電位重新武裝後仍可再次觸發；未進行ESP32實機驗證。
+- **部署／回復：**重新上傳`tasks.py`與私人`config.py`並重啟ESP32；`config.example.py`、文件與`ChangeLog.md`供版控／教學使用，不上傳到裝置。回復時將兩個裝置檔案的`PIR_LOW_REARM_MS`改回5000。
+
+## CHG-20261012-019｜讓移動／喇叭狀態獨立更新網頁
+
+- **類別：**BUG（PIR已觸發並播放音樂，但網頁的移動狀態未及時更新）。
+- **日期／紀錄時間：**2026-10-12 01:40:10 +08:00，工具取得台北時間。
+- **原因：**前端原本只透過`GET /api/data`取得移動狀態；該API同時讀取DHT與ADC，慢感測或回應延遲時，PIR／喇叭RAM快照也會被一起延遲。此項以程式路徑分析定位，未宣稱已在ESP32重現每一個阻塞時序。
+- **作法：**新增`GET /api/motion/status`，只複製`motion_state`快照並回`Cache-Control: no-store`；`index.html`新增獨立的`updateMotionStatus()`／`pollMotionStatus()`，每1000 ms輪詢且同一時間只保留一筆請求。`/api/data`仍保留`motion`欄位以維持既有API相容性。
+- **影響：**PIR偵測時間、去抖與喇叭播放邏輯不變；網頁移動文字、最近5次紀錄、次數與喇叭狀態不再依賴完整感測資料API完成。同步更新前端測試、API測試、`WEB_UI_EXECUTION_GUIDE.md`與`SYSTEM_ARCHITECTURE.md`。
+- **驗證：**前端RFID／移動狀態測試與LED輪詢測試通過；完整Python測試24/24通過，指定檔案`py_compile`通過，Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過，`git diff --check`無差異錯誤。測試確認獨立API快照可更新移動文字與喇叭狀態。未進行ESP32實機驗證。
+- **部署／回復：**重新上傳`index.html`與`web_server.py`並重啟ESP32，使`HTML_PAGE`重新載入；不需上傳`tasks.py`或`config.py`。若需回復，還原上述兩個程式檔案與前端／API測試、文件變更。
+
+## CHG-20261012-018｜修正MicroPython MQTT例外診斷遮蔽原始錯誤
+
+- **類別：**BUG（MQTT連線錯誤被缺少的`traceback`模組再次覆蓋）。
+- **日期／紀錄時間：**2026-10-12 01:30:05 +08:00，工具取得台北時間。
+- **原因：**`mqtt_client.py`捕捉到`[Errno 104] ECONNRESET`後匯入桌面Python的`traceback`；ESP32的MicroPython環境沒有該模組，因此原始網路錯誤被替換成`no module named 'traceback'`並冒泡到`main.py`。`main.py`最外層也有相同不相容匯入。
+- **作法：**移除`communication/mqtt_client.py`與`main.py`的`traceback`匯入／呼叫；連線失敗改以`type(e).__name__`與`str(e)`輸出原始例外並回傳`False`，主程式致命錯誤路徑也採相容字串輸出。新增MQTT測試替身，確認`OSError(104, 'ECONNRESET')`不再被`ModuleNotFoundError`遮蔽。
+- **影響：**ESP32將看到類似`OSError: [Errno 104] ECONNRESET`的真正連線錯誤，MQTT初始連線仍依`main.py`既有3次嘗試與其他功能繼續運行政策處理；未改變Broker、TLS或重連策略。
+- **驗證：**MQTT例外回歸測試通過；完整Python測試24/24通過，Node前端測試通過，指定Python檔案`py_compile`通過，Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過。測試以fake MQTT client重現`OSError(104, 'ECONNRESET')`並確認回傳`False`且不再拋出`ModuleNotFoundError`。未進行ESP32實機或Broker端到端驗證。
+- **部署／回復：**重新上傳`communication/mqtt_client.py`與`main.py`，重啟ESP32；若只需恢復診斷文字，還原這兩個檔案即可。`lib/mqtt_as.py`與私人`config.py`不需因本修正變更。
+
+## CHG-20261012-017｜延長PIR穩定低電位重新武裝時間
+
+- **類別：**BUG（實機仍出現同一次靠近的兩次事件）。
+- **日期／紀錄時間：**2026-10-12 01:22:04 +08:00，工具取得台北時間。
+- **原因：**上一版非同步狀態機只要求低電位穩定500 ms；實際PIR模組在同一次手部靠近期間可能產生間隔超過500 ms但仍屬同一反應的第二個高脈衝，因此狀態機已重新武裝後再次計數。
+- **作法：**將`PIR_LOW_REARM_MS`由500調整為5000，保留100 ms非同步取樣與200 ms穩定高電位確認。只有低電位連續穩定5秒才重新武裝，避免PIR模組的分離脈衝被當成兩次移動；同步更新私人設定指引、公開設定範例、測試時序與兩份文件。
+- **影響：**一次移動事件結束後，需持續無移動5秒才允許下一次事件；5秒內的第二次真實移動會合併為同一事件。5秒是目前針對使用者實機現象的保守參數，仍可依PIR模組輸出調整。
+- **驗證：**PIR／音樂測試6/6通過；完整Python測試23/23通過；Node前端測試通過；指定Python檔案`py_compile`通過；Mermaid 11.13.0解析13/13通過。測試涵蓋tick回繞、短暫低／高抖動、穩定低5秒重新武裝與最近5筆歷史。未進行ESP32實機驗證。
+- **部署／回復：**更新`tasks.py`，並在裝置私人`config.py`將`PIR_LOW_REARM_MS`改為5000；不可用公開範例覆蓋私人WiFi設定。重啟ESP32後再觀察實際PIR；回復時將此參數還原為500（若要回復上一版狀態機行為，也需同步還原`tasks.py`）。
+
+## CHG-20261012-016｜實作PIR非同步穩定邊緣防抖
+
+- **類別：**需求變更（PIR事件判斷改善）。
+- **日期／紀錄時間：**2026-10-12 01:09:45 +08:00，工具取得台北時間。
+- **原因：**固定`PIR_RETRIGGER_COOLDOWN_MS = 5000`只能以時間抑制重複事件，無法判斷移動是否真正結束；它可能吞掉5秒內真正分開的第二次移動。使用者要求實作較好的非同步防抖機制。
+- **作法：**`tasks.py`改用非阻塞穩定邊緣狀態機：每100 ms取樣，PIR高電位連續200 ms才觸發一次；觸發後保持未武裝，低電位連續500 ms才重新武裝；短暫低／高抖動不會重新計數。新增`PIR_HIGH_DEBOUNCE_MS`、`PIR_LOW_REARM_MS`與`MOTION_DETECTED_HOLD_MS`設定，移除固定冷卻參數；`MOTION_DETECTED_HOLD_MS`只保留網頁顯示保持語意。更新`config.example.py`、PIR測試與兩份文件。
+- **影響：**一次手部靠近的PIR訊號必須先穩定高才計數；同一次事件內的高電位持續或短暫低／高抖動不會重複觸發。下一次事件必須先完成穩定低重新武裝。輪詢由500 ms改為100 ms，增加取樣頻率但仍使用uasyncio非同步睡眠，不阻塞其他任務。
+- **驗證：**PIR／音樂測試6/6通過；完整Python測試23/23通過；Node前端測試通過；指定Python檔案`py_compile`通過；Mermaid 11.13.0解析13/13通過；測試涵蓋初始高電位、tick回繞、短暫低／高抖動、穩定低重新武裝與最近5筆歷史。未進行ESP32實機驗證。
+- **部署／回復：**更新`tasks.py`；在裝置私人`config.py`同步加入`PIR_POLL_INTERVAL_MS = 100`、`PIR_HIGH_DEBOUNCE_MS = 200`、`PIR_LOW_REARM_MS = 500`、`MOTION_DETECTED_HOLD_MS = 5000`，不可用公開範例覆蓋私人WiFi設定。同步更新時可上傳`config.example.py`僅作公開基線；重啟ESP32後觀察實際PIR，再依硬體輸出調整三個時間參數。回復時還原`tasks.py`與私人設定的新增欄位。
+
+## CHG-20261012-015｜補充PIR冷卻值來源與狀態機改進提案
+
+- **類別：**需求變更（文件澄清）。
+- **日期／紀錄時間：**2026-10-12 01:05:19 +08:00，工具取得台北時間。
+- **原因：**使用者詢問`5000ms`的來源及是否存在比固定冷卻時間更好的PIR判斷方式；現行文件只描述5秒行為，沒有明確標示它是沿用的啟發式，也沒有區分尚未實作的狀態機提案。
+- **作法：**同步更新`WEB_UI_EXECUTION_GUIDE.md`與`SYSTEM_ARCHITECTURE.md`：明確說明5000 ms來自既有`detected`保持時間、不是硬體校正值；補充「穩定高電位確認、觸發一次、穩定低電位重新武裝」狀態機作為改進提案，並標示目前尚未實作。
+- **影響：**只修改教學／架構說明，不改變目前ESP32行為；現行程式仍使用`PIR_RETRIGGER_COOLDOWN_MS = 5000`。提案不可當成已部署功能。
+- **驗證：**Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過；本次沒有修改程式，因此沿用CHG-20261012-014已記錄的23/23 Python、Node與語法驗證。未進行ESP32實機驗證。
+- **部署／回復：**不需重新上傳韌體；同步納入兩份文件與`ChangeLog.md`即可。回復時還原本紀錄涉及的文件段落。
+
+## CHG-20261012-014｜抑制單次移動造成的重複PIR偵測
+
+- **類別：**BUG（一次手靠近被計為兩次移動）。
+- **日期／紀錄時間：**2026-10-12 00:56:11 +08:00，工具取得台北時間。
+- **原因：**`pir_monitor_task()`只依前一輪的高／低電位判斷低到高邊緣；PIR輸出若在同一次靠近期間短暫低再回高，500 ms輪詢會把抖動視為第二次移動。原本的5秒`detected`顯示保持時間沒有阻止事件計數再次增加。
+- **作法：**新增`PIR_RETRIGGER_COOLDOWN_MS = 5000`（同步更新`config.example.py`），`tasks.py`在低到高邊緣觸發前檢查距離上次有效偵測的時間；冷卻期間只更新目前感測狀態，不設定新的`motion_event`、不增加`count`、不加入`recent_detections`。冷卻後的新低到高才視為新事件。
+- **影響：**同一次移動造成的短暫低／高抖動不再重複播放音樂或增加網頁移動次數；目前5秒內的第二次真實靠近也會被視為同一事件，需依實機感測器特性調整`PIR_RETRIGGER_COOLDOWN_MS`。預設值與既有5秒顯示保持時間一致。
+- **驗證：**PIR／音樂測試6/6通過，新增測試確認冷卻期間的第二個低到高被抑制、冷卻後可重新計數；完整Python測試23/23通過，Node前端測試通過，指定Python檔案`py_compile`通過；Web／系統文件Mermaid 11.13.0解析13/13通過。未進行ESP32實機驗證。
+- **部署／回復：**需更新`tasks.py`；建議在裝置私人`config.py`加入`PIR_RETRIGGER_COOLDOWN_MS = 5000`，不可用公開`config.example.py`覆蓋私人WiFi設定；`config.py`未加入版本控制。`index.html`與`web_server.py`本次不因PIR去重而必須更新，除非尚未部署前一版狀態API／網頁修改。回復時還原`tasks.py`與設定範例，並重啟ESP32。
+
+## CHG-20261012-013｜修正閃紅次數為完整警示事件次數
+
+- **類別：**BUG（LED閃紅計數語意不符合需求）。
+- **日期／紀錄時間：**2026-10-12 00:44:14 +08:00，工具取得台北時間。
+- **原因：**前一版把低光警示內的每一次紅燈閃爍當成一筆紀錄，因此完整閃紅5次會顯示為5次；使用者定義「完整閃紅5次才算閃紅1次」。
+- **作法：**`services/led_service.py`改為只有完成整組`LIGHT_ALERT_BLINK_COUNT`次閃紅後才增加`alert_flash_count`，並以整組完成時間建立一筆`alert_flash_log`；未完成的警示不計入。事件序號保留最近5筆，序號仍以裝置開機後完成的事件總數遞增。`index.html`移除`次數／5`顯示，改顯示完成事件總數；`web_server.py`沿用相同欄位名稱但同步新的語意。測試、Web／系統架構文件補充完整事件定義。
+- **影響：**例如LED完整閃紅5次後顯示`閃紅次數：1`與`閃紅1：完成時間`；第二次完整警示才顯示`閃紅次數：2`。`alert_flash_total`仍代表一個事件內的閃爍動作數，不是事件次數。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；`python -B -m unittest discover -s tests -v`通過22/22，包含兩個完整警示事件序號驗證；指定Python檔案`py_compile`通過；Chromium以事件級mock確認顯示`閃紅次數：1`與`閃紅1：完成時間`，且uPlot Canvas存在；Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過。未進行ESP32實機驗證。
+- **部署／回復：**需同步部署`index.html`、`web_server.py`、`services/led_service.py`、測試與兩份同步文件；不需重新部署RFID／PIR程式。回復時同步還原本紀錄涉及的檔案，避免前端把事件次數誤顯示為單次閃爍次數。
+
+## CHG-20261012-012｜顯示LED閃紅、RFID與移動偵測最近紀錄
+
+- **類別：**需求變更（狀態可觀測性與網頁卡片顯示）。
+- **日期／紀錄時間：**2026-10-12 00:26:20 +08:00，工具取得台北時間。
+- **原因：**使用者要求LED狀態區顯示閃紅次數及「閃紅序號：時間」，RFID只顯示最近5次「卡號：讀卡時間」，移動偵測只顯示最近5次偵測時間；原本API只保留單筆RFID／PIR摘要，LED也沒有閃紅事件時間。
+- **作法：**`services/led_service.py`在每次低光閃紅開始時以裝置時間記錄`alert_flash_log`，snapshot新增`alert_flash_count`、`alert_flash_total`與紀錄清單；`hardware/rfid.py`與`tasks.py`保留最多5筆`recent_reads`；`hardware/motion.py`與`tasks.py`保留最多5筆`recent_detections`；`web_server.py`的LED fallback同步提供新欄位。`index.html`新增LED閃紅次數／時間列表，RFID與移動卡片改以最近5筆資料重繪。兩份架構／Web教學文件補充API欄位、RAM生命週期與畫面對應；測試加入歷史資料與LED時間紀錄驗證。
+- **影響：**`/api/data`與`/api/led/status`新增LED閃紅紀錄欄位，RFID／PIR快照新增最近紀錄欄位，不移除既有最後一筆欄位。歷史只存在ESP32 RAM，重啟清空；前端不另行累積。LED閃紅紀錄最多依設定的警示次數保存，RFID與移動偵測固定最多5筆。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；`python -B -m unittest discover -s tests -v`通過22/22；指定Python檔案`py_compile`通過；Chromium以模擬API實際檢查LED顯示5筆序號／時間、RFID只顯示輸入6筆中的最後5筆、移動偵測只顯示輸入6筆中的最後5筆，且uPlot Canvas存在；完整文件13/13個Mermaid區塊以Mermaid 11.13.0解析通過。未進行ESP32實機驗證。
+- **部署／回復：**需同步部署`index.html`、`web_server.py`、`services/led_service.py`、`hardware/rfid.py`、`hardware/motion.py`、`tasks.py`及其相依版本文件，重啟ESP32後強制重新整理瀏覽器；不可只上傳`index.html`，因為新欄位由裝置端狀態與API提供。回復時同步還原上述程式、測試、文件與本紀錄，避免前端與API契約不一致。
+
+## CHG-20261012-011｜由/api/data提供光照遲滯門檻
+
+- **類別：**需求變更（API與網頁圖表設定同步）。
+- **日期／紀錄時間：**2026-10-12 00:05:15 +08:00，工具取得時間。
+- **原因：**確認光照紅線不應在`index.html`重複寫死1000／1100；實際裝置`config.py`的觸發值為500、復位值為1100，前端必須使用同一份裝置設定。
+- **作法：**`web_server.py`匯入`config`，讓`/api/data`新增`light_thresholds.trigger`與`light_thresholds.reset`；`index.html`新增`updateLightThresholds()`，從API回應更新uPlot紅線與數字標籤，初次缺少有效欄位時不繪製、已取得有效值後暫時缺欄位則保留最後值。更新Python／Node測試與兩份uPlot整合文件。
+- **影響：**`/api/data`回應新增欄位，不移除既有欄位；光照紅線會顯示裝置實際門檻，例如目前`暗 500`／`亮 1100`。不改變80筆歷史、移動平均（仍未加入）、ADC取樣或LED後端控制。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Python桌面回歸測試20/20通過；`py_compile web_server.py`通過；Chromium以模擬API先提供500／1100、再改提供700／1200，確認前端門檻診斷值同步更新且uPlot圖表仍正常；Mermaid 11.13.0解析兩份文件共13/13個圖表區塊通過。未進行ESP32實機驗證。
+- **部署／回復：**同步部署`web_server.py`與`index.html`，重啟ESP32並強制重新整理；回復時兩者與文件、`ChangeLog.md`需同步還原，避免前端期待不存在的`light_thresholds`欄位。
+
+## CHG-20261011-010｜在光照圖加入亮暗遲滯紅線
+
+- **類別：**需求變更（網頁圖表操作提示）。
+- **日期／紀錄時間：**2026-10-11 23:52:01 +08:00，工具取得時間。
+- **原因：**使用者希望在光照折線圖中直接看見亮暗控制的緩衝區，並以數字標示兩條邊界。
+- **作法：**`index.html`新增`LIGHT_ALERT_TRIGGER_ADC = 1000`與`LIGHT_ALERT_RESET_ADC = 1100`，透過uPlot`hooks.draw`繪製兩條紅色實線，分別標示`暗 1000`與`亮 1100`；1000～1099的遲滯區間不加入移動平均，也不改變原始光照資料與LED後端判斷。
+- **影響：**圖表在目前0～2048或高值時0～4095的Y軸內顯示兩條操作參考線；前端門檻常數必須與裝置端`config.py`保持一致。API、80筆歷史視窗、uPlot資產與ESP32控制邏輯不變。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Chromium以本機uPlot資產及模擬API確認0～2048與擴展至4095時，1000／1100兩條紅色實線及標籤都有Canvas紅色像素；未進行ESP32實機驗證。
+- **部署／回復：**只需部署更新後的`index.html`；回復時還原本紀錄前的`index.html`、文件與`ChangeLog.md`即可。
+
+## CHG-20261011-009｜光照歷史折線改顯示最近80筆
+
+- **類別：**需求變更（網頁圖表顯示範圍）。
+- **日期／紀錄時間：**2026-10-11 23:32:39 +08:00，工具取得時間。
+- **原因：**使用者希望利用整列光照卡片顯示較長的光照歷史，先觀察80筆原始資料的折線效果；本次不加入移動平均或其他濾波。
+- **作法：**`index.html`將`LIGHT_HISTORY_LIMIT`由20改為80，光照卡片說明文字、`WEB_UI_EXECUTION_GUIDE.md`與`SYSTEM_ARCHITECTURE.md`同步改為最近80筆，X軸滑動視窗同步維持`0～79`；資料仍限制在0～4095並沿用2048／4095自適應Y軸。
+- **影響：**以目前約每秒一次的感測輪詢，圖表約涵蓋80秒；歷史仍只存在瀏覽器RAM，`/api/data`、ESP32後端與uPlot資產不變。80筆增加的是觀察時間範圍，不等同數學上的平滑處理。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Chromium以本機uPlot資產及模擬API加入81筆原始樣本，確認保留80筆、X軸為`0～79`、Canvas存在且最後資料仍為原始值，未套用移動平均。未進行ESP32實機驗證。
+- **部署／回復：**只需部署更新後的`index.html`；文件同步納入版本庫。回復時還原本紀錄前的`index.html`、`WEB_UI_EXECUTION_GUIDE.md`、`SYSTEM_ARCHITECTURE.md`與`ChangeLog.md`即可。
+
+## CHG-20261011-008｜補充uPlot與Web資產整合教學文件
+
+- **類別：**需求變更（文件補充）。
+- **日期／紀錄時間：**2026-10-11 23:24:01 +08:00，工具取得時間。
+- **原因：**使用者要求詳細說明uPlot如何整合進`index.html`與`web_server.py`（使用者訊息中的`web_server.ph`依目前專案實際檔名更正為`.py`），讓載入順序、資料生命週期、軸範圍、靜態資產路由、快取與ESP32部署責任清楚可追蹤。
+- **作法：**在`WEB_UI_EXECUTION_GUIDE.md`新增uPlot整合專節，說明HTML引用、`updateLightChart()`資料流、20筆瀏覽器歷史、X／Y軸設定、Canvas更新、錯誤定位與`Response.send_file()`路由；在`SYSTEM_ARCHITECTURE.md`新增裝置資料／頁面應用／繪圖函式庫的責任分層、部署檢核與故障邊界。
+- **影響：**只修改教學與架構文件，不改變程式、API、部署資產或裝置行為；兩份Markdown的整理時間更新為2026-10-11 23:23:20 +08:00。
+- **驗證：**Mermaid 11.13.0實際解析`WEB_UI_EXECUTION_GUIDE.md` 12/12、`SYSTEM_ARCHITECTURE.md` 1/1，共13/13個圖表區塊通過；uPlot URL、路由、函式名稱與部署檔案以目前`index.html`／`web_server.py`實作交叉檢查一致。未進行ESP32實機驗證。
+- **部署／回復：**文件可直接納入版本庫；回復時還原本紀錄前的`WEB_UI_EXECUTION_GUIDE.md`、`SYSTEM_ARCHITECTURE.md`與`ChangeLog.md`即可。
+
+## CHG-20261011-007｜修正uPlot光照折線只顯示前兩點
+
+- **類別：**BUG（光照圖表更新）。
+- **日期／紀錄時間：**2026-10-11 22:53:23 +08:00，工具取得時間。
+- **原因：**使用者回報uPlot折線只顯示前兩點且不再向後延伸。原因是更新資料時保留`setData(..., false)`，但X軸仍使用自動範圍；初始範圍未同步到新增資料，造成後續點落在可視範圍外。
+- **作法：**將uPlot X軸改為明確的非自動範圍，依目前最近20筆資料同步設定`0`至`length - 1`（單點時至少保留`0～1`）；Y軸既有自適應2048／4095邏輯不變。測試替身同步記錄X軸範圍，加入點數增加時X軸上限擴展的回歸檢查。
+- **影響：**光照折線會隨新資料延伸，超過20筆後保留最近20筆並維持可視寬度；不改變感測資料契約或其他卡片。
+- **驗證：**`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Python桌面回歸測試20/20通過；`py_compile web_server.py`通過；Chromium以本機uPlot資產及模擬API加入光照樣本後，確認資料長度達20且X軸範圍為0～19，折線會持續向後延伸。未進行ESP32實機上傳與實機瀏覽器驗證。
+- **部署／回復：**部署更新後的`index.html`與`ChangeLog.md`；回復時還原本紀錄前的`index.html`即可。
+
+## CHG-20261011-006｜部署本機uPlot並改用自適應光照圖表
+
+- **類別：**需求變更（網頁圖表與部署資產）。
+- **日期／紀錄時間：**2026-10-11 22:27:21 +08:00，工具取得時間。
+- **原因：**使用者同意以輕量圖表函式庫取代自製SVG光照圖，並要求光照Y軸聚焦在實際常用的2048以下區間；同時必須把函式庫下載並隨ESP32 Web資源部署，不依賴外部CDN。
+- **作法：**固定採用uPlot 1.6.32，從npm官方tarball下載並以npm metadata的SHA-512 integrity驗證通過；部署`assets/uplot/1.6.32/uPlot.iife.min.js`（51081 bytes）、`uPlot.min.css`（1857 bytes）及MIT `LICENSE`。`web_server.py`新增兩個固定資產路由，使用`Response.send_file()`串流與長效快取。`index.html`改以uPlot Canvas繪製最近20筆光照資料；Y軸平時為0～2048並使用0／512／1024／1536／2048刻度，資料出現大於2048時擴展至4095並使用完整刻度，超出ADC邊界的資料限制到0～4095。
+- **同步更新：**`tests/test_led_polling.cjs`、`tests/test_rfid_ui.cjs`加入uPlot測試替身與自適應Y軸範圍驗證；`WEB_UI_EXECUTION_GUIDE.md`、`SYSTEM_ARCHITECTURE.md`與`GIT_VERSION_CONTROL.md`補充本機資產生命週期、路由、ESP32部署結構及資產納入版控的指令。
+- **影響：**新增約51 KB JavaScript與約2 KB CSS的本機Web資產；不改變`/api/data`、LED快速狀態、LED owner、RFID或移動偵測資料契約。資產版本固定於URL路徑，升級函式庫時需同步新增版本目錄、路由與部署檔案。
+- **驗證：**uPlot tarball integrity通過；`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過；Python桌面回歸測試20/20通過；`py_compile web_server.py`通過；修改後的`WEB_UI_EXECUTION_GUIDE.md`與`SYSTEM_ARCHITECTURE.md`全部13個Mermaid區塊以Mermaid 11.13.0 parser解析通過。Chromium以本機靜態資產及模擬API實際驗證uPlot載入、Canvas建立、0～2048一般刻度、超過2048時4095刻度、折線繪製及窄螢幕布局。未進行ESP32實機上傳、MicroPython資產路由與實機瀏覽器驗證。
+- **部署／回復：**上傳`index.html`、`web_server.py`、`assets/uplot/1.6.32/`、測試與文件；重啟ESP32並強制重新整理瀏覽器。回復時需同步移除uPlot資產路由與資產，或還原本紀錄前的`index.html`與`web_server.py`，避免頁面請求不存在的資產。
+
+## CHG-20261011-005｜放大光照折線圖並補充Y軸刻度
+
+- **類別：**需求變更（網頁介面）。
+- **日期／紀錄時間：**2026-10-11 21:52:05 +08:00，工具取得時間。
+- **原因：**使用者希望光照卡片撐滿整列，並透過Y軸刻度與水平虛線清楚辨識光照數值所在區域及變化。
+- **作法：**`index.html`讓光照卡片跨滿感測卡片區整列；SVG圖表擴大為全列寬度，新增固定0～4095 ADC的Y軸刻度（4095、3072、2048、1024、0）與五條水平虛線；折線改依ESP32 12-bit ADC固定範圍繪製，超出範圍的顯示值限制在圖表邊界內。`tests/test_led_polling.cjs`新增0與4095邊界位置驗證。
+- **影響：**只改變光照網頁呈現與瀏覽器繪圖座標，不改變光照API、警示閾值、LED owner或其他卡片資料。固定Y軸讓不同時間的圖表可直接比較，但低幅度變化可能比自動縮放更不明顯。
+- **驗證：**已執行 `node tests/test_led_polling.cjs`、`node tests/test_rfid_ui.cjs`，兩項均通過；`python -B -m unittest discover -s tests -v` 執行20個測試，20/20通過。以模擬API回應完成Chromium實際檢查：桌面光照卡片跨滿整列、Y軸刻度與水平虛線可見，變化資料可依固定ADC範圍繪製；窄螢幕光照卡片寬度符合單欄布局。未進行ESP32實機驗證。
+- **部署／回復：**部署時更新 `index.html` 與前端測試檔；瀏覽器強制重新整理。可回復本次修改前的 `index.html`、`tests/test_led_polling.cjs` 與本紀錄新增段落。
+
+## CHG-20261011-004｜重新配置網頁儀表板卡片與光照折線圖
+
+- **類別：**需求變更（網頁介面）。
+- **日期／紀錄時間：**2026-10-11 21:39:33 +08:00，工具取得時間。
+- **原因：**使用者要求將光照卡片改為折線顯示，RFID 與移動偵測卡片並列，將 LED 狀態區移到控制按鈕上方，並放大主要文字。
+- **作法：**`index.html`新增不依賴外部套件的 SVG 光照折線圖，保留最近 20 次有效 ADC 讀值並由既有感測輪詢更新；RFID／移動偵測改用雙欄卡片布局，窄螢幕自動改為單欄；LED 狀態與命令提示合併成狀態區並移到按鈕列上方；同步放大卡片、系統狀態、LED 狀態與按鈕文字。`tests/test_led_polling.cjs`及`tests/test_rfid_ui.cjs`補充折線圖更新與空圖提示驗證。
+- **影響：**只改變網頁呈現與瀏覽器內的光照歷史快取，不改變後端 API、LED 權限／busy 檢查、RFID／PIR資料契約或 ESP32 控制流程。光照折線歷史於頁面重新載入後清空。
+- **驗證：**已執行 `node tests/test_led_polling.cjs`、`node tests/test_rfid_ui.cjs`，兩項均通過；`python -B -m unittest discover -s tests -v` 執行 20 個測試，20/20 通過。以本機靜態頁面及模擬 API 回應完成 Chromium 實際布局檢查：桌面 RFID／移動偵測同列、LED 狀態在按鈕上方、光照折線圖可見；窄螢幕兩卡片改為單欄。未進行 ESP32 實機驗證。
+- **部署／回復：**部署時更新 `index.html`，瀏覽器強制重新整理以取得新頁面；可由本次修改前的 `index.html` 與兩個測試檔案回復，後端不需重新上傳。
+
+## CHG-20261011-003｜補充新增LED效果需求的快速整合方法
+
+- **類別：**需求變更（文件）。
+- **日期／紀錄時間：**2026-10-11 16:51:48 +08:00，工具取得時間。
+- **原因：**使用者要求將「增加按鈕 3、按下時綠閃 3 次」的擴充說明整合進單一 LED owner 講義，說明目前機制如何在不新增第二個控制者的情況下快速加入新需求。
+- **作法：**`LED_SINGLE_OWNER_GUIDE.md` 新增 0.8 節，說明綠閃效果規格、紅閃／綠閃同時發生時採先接受者完成、後來者以 `busy` 拒絕的政策；補充正常／效果狀態流程、按鈕去彈跳與按住拒絕、`main.py`／`tasks.py`／`config.example.py`／`services/led_service.py`／測試的整合點，以及新增效果所需的測試清單。
+- **已實作／提案：**本次只更新文件，沒有新增按鈕 3、綠閃效果或任何韌體程式；`_EFFECTS` 表與相關程式片段是後續實作建議，不代表目前程式已支援綠閃。
+- **驗證：**既有文件的 21 個 Mermaid 區塊使用 Mermaid 11.13.0 parser 實際解析，21/21 通過；桌面回歸測試執行 20 個測試，20/20 通過。未進行新增按鈕 3 的 ESP32 實機驗證，因本次未修改程式。
+- **影響／部署／回復：**只更新教學文件與變更紀錄，不需重新上傳韌體。可由本次修改前的 Git 版本回復 `LED_SINGLE_OWNER_GUIDE.md`；既有 LED 控制機制不變。
+
+## CHG-20261011-002｜以國中生比喻與第一性原理重整LED單一擁有者講義
+
+- **類別：**需求變更（文件與教學順序）。
+- **日期／紀錄時間：**2026-10-11 15:33:16 +08:00，工具取得時間。
+- **原因：**使用者要求先清楚說明三種需求共用一個三色 LED 所造成的紅閃、恢復、禁用與時序錯亂，再說明目前解法；並以費曼式、國中生可理解的比喻建立第一性原理技術樹，明確區分目前實機操作良好與尚未完整測試。
+- **作法：**重整 `LED_SINGLE_OWNER_GUIDE.md` 開頭閱讀路線，新增「問題→解法→第一性原理技術樹→技術點逐一解釋→證據界線」；用受理窗口、待辦清單、LED 工作員、號碼牌、火警演習與公告欄等比喻對應 `submit`、`queue`、`LedService.run`、receipt、reserved／busy、狀態機、快照與後端權威；保留後續案例、網頁狀態、附錄規格與部署參考。
+- **已實作／提案：**本次只修改講義，不修改 LED 控制程式；目前架構仍是實體按鈕、網頁按鈕與光感警示共用單一 LED owner。更好的仲裁機制仍是後續比較題目；MQTT callback 未接通與實機測試不完整的限制已在講義中明確標示。
+- **驗證：**`LED_SINGLE_OWNER_GUIDE.md` 全部 21 個 Mermaid 區塊使用 Mermaid 11.13.0 parser 實際解析，21/21 通過；`python -B -m unittest discover -s tests -v` 執行 20 個桌面回歸測試，20/20 通過。未宣稱已完成 ESP32 實機、長時間、多來源壓力、網路或所有故障時序驗證。
+- **影響／部署／回復：**只更新教學文件與變更紀錄，不需重新上傳韌體。可由本次修改前的 Git 版本回復 `LED_SINGLE_OWNER_GUIDE.md`；既有 `CHG-20261011-001` 與歷史紀錄保留。
+
+## CHG-20261011-001｜從 main.py 重整 ESP32 系統架構文件
+
+- **類別：**需求變更（文件）。
+- **日期／紀錄時間：**2026-10-11 14:32:36 +08:00，工具取得時間。
+- **原因：**使用者要求從 `main.py` 開始解析 ESP32 IoT 專案，並將分析整合回 `SYSTEM_ARCHITECTURE.md`；原文件仍含九個任務、LED 直接寫入、RFID／PIR／喇叭未整合等過時描述。
+- **作法：**重整 `SYSTEM_ARCHITECTURE.md`，補充 `boot.py`→`main.py` 啟動鏈、硬體初始化順序、共享事件與狀態、目前 13 個應用協程、`LedService` 單一 owner、DHT／光感／PIR／RFID／OLED／喇叭資料流、HTTP API、MQTT callback 未接通的實作限制、部署相依與實機檢核順序。同步移除已不符合目前程式的舊 LED `off()`／自動控制描述。
+- **已實作／提案：**本次只更新文件；文件中的 MQTT 修正、感測資料品質、健康監控、任務 supervisor、安全與部署改善仍是待後續實作的提案，未宣稱已修正程式。
+- **驗證：**`SYSTEM_ARCHITECTURE.md` 的全部 1 個 Mermaid 區塊已使用 Mermaid 11.13.0 parser 實際解析，1/1 通過；`python -B -m unittest discover -s tests -v` 執行 20 個桌面回歸測試，20/20 通過。未進行 ESP32 實機、GPIO 接線、WiFi、MQTT、Microdot 或周邊驗證。
+- **影響／部署／回復：**只需更新教學文件，不需重新上傳韌體。可由本次修改前的 Git 版本回復 `SYSTEM_ARCHITECTURE.md`；`ChangeLog.md` 保留本紀錄與既有歷史。
+
+
+## CHG-20261007-006｜實測後補充狀態有效期限講義
+
+- **類別：**需求變更（講義與後續協作規則）。
+- **日期／紀錄時間：**2026-10-07 14:35:19 +08:00，工具取得時間。
+- **原因與實測來源：**使用者回報瀏覽器重新整理後不再因連線失敗訊息讓按鈕1瞬間失能，依先前約定補入講義。精確實測時間、持續時間與HTTP數據未提供；不宣稱偶發查詢失敗根因已修正。
+- **作法：**LED_SINGLE_OWNER_GUIDE.md新增8C，以比較表、角色／變數表、決策圖、時序案例說明內容相同仍重新確認、連線健康與LED有效性分離、5秒期限、200ms監視、1秒timeout、診斷RAM與部署快取。8A前加版本提示，標示單次失敗立即停用已被取代；AGENTS.md優先規則同步引用8C及期限原則。
+- **已實作／提案：**程式沿用5f3807c，不修改程式或參數；5秒是目前值並非普遍安全保證。PIR輸出仍沿用ab5465f，尚無新實機確認。本次沒有新增推送或事件歷史。
+- **驗證：**講義全部20張Mermaid圖已使用11.13.0實際解析，20/20通過；未Typora／VS Code視覺布局驗證。純文件／規則修改不重跑程式測試，桌面結果與使用者實機回報分開記錄。
+- **影響／部署／回復：**無需重新上傳ESP32；只更新教學與後續設計規則。ab5465f保存文件修改前版本，留在refactor/led-single-owner本機提交，未推送或合併。
+
+## CHG-20261007-005｜PIR終端輸出改為帶時間的移動事件
+
+- **類別：**需求變更。
+- **日期／紀錄時間：**2026-10-07 14:25:22 +08:00，工具取得時間。
+- **原因：**使用者希望Thonny不再被GPIO讀值0洗版，移動時顯示偵測時間。
+- **作法：**tasks.py移除GPIO變化／每20次輪詢的診斷輸出與其計數器；首次高電位或低轉高時輸出偵測日期時間，沿用get_current_time，與網頁last_detected_at共用該次時間。持續高電位不重複輸出。啟動與錯誤訊息保留，偵測、音樂與網頁狀態政策不變。
+- **驗證：**4個PIR／音樂桌面回歸測試通過；未ESP32／Thonny實機驗證。時間依裝置現有時鐘，未同步NTP時不保證實際時間準確。
+- **部署／回復：**上傳tasks.py後重啟；5f3807c保存修改前版本。同步維護無狀態參數的測試時間來源，未修改講義；本機提交，未推送。
+
+## CHG-20261007-004｜短暫LED查詢失敗與連線健康分開判斷（待實機確認）
+
+- **類別：**BUG。
+- **日期／內容紀錄時間：**2026-10-07 14:21:02 +08:00，工具取得時間。
+- **原因：**使用者確認無操作時仍常見「LED狀態回應逾時或連接失敗」瞬閃；光照持續有資料。前端單次查詢失敗立即停用、下一次成功立即恢復，造成操作混淆。頻繁失敗根因尚未量測，不能宣稱網路或排程問題已修復。
+- **比較基線：**修改前工作目錄乾淨，既有commit f6b8e53已保存立即停用版本，無需建立空提交；本次可用git diff f6b8e53比較。
+- **作法：**index.html以performance.now單調時間分開記錄最近LED成功確認與任一資料API成功時間；LED內容即使相同也更新確認時間。單次失敗保留原狀態，LED超過5秒未確認才停用；光照API成功只能確認連線，不延長LED有效期限或回寫LED副本。獨立200ms監視有效期限，不必等HTTP回應才發現過期。紅閃／服務不可用仍立即停用，後端busy檢查不變。
+- **參數與診斷：**5秒為待實測的容忍值，1秒單筆timeout及200ms輪詢保留；getLedDiagnostics提供连续失敗數、最近錯誤與兩種資料年齡，成功清除連續失敗數但保留最近錯誤。只存一筆錯誤與快照，不累積歷史。未取得新狀態時可能暫時保留過去可操作提示，後端仍拒絕紅閃改色。
+- **驗證：**2組桌面JavaScript測試及20個Python回歸測試通過，涵蓋單次失敗不閃動、感測成功不延長LED期限、整體連線過期、相同快照刷新期限、晚到回應忽略與原RFID／PIR功能。未實機測試，講義依使用者要求待確認後再更新。
+- **部署／回復：**僅需上傳index.html並強制重新整理，沿用已部署快速狀態API。可由f6b8e53取得舊index.html回復比較。只在本機分支實作／提交，未推送或合併。
+
+## CHG-20261007-003｜講義比較網頁狀態架構並建立優先設計規則
+
+- **類別：**需求變更（講義與協作規則）。
+- **日期／內容紀錄時間：**2026-10-07 13:28:35 +08:00，工具取得當前時間。
+- **原因：**使用者確認更新後即時反應良好，要求說明前後架構、改良思路與舊設計缺點，並優先沿用此方式。實機測試精確時間與量測數據未提供，不宣稱200ms上限或所有情況穩定。
+- **作法：**LED_SINGLE_OWNER_GUIDE.md新增8B，包含雙架構圖、比較表、取樣／HTTP等待、重疊與舊回應風險、完整紅閃案例、RAM／JSON／Promise生命週期、逾時與權威控制、適用前提及流量／短事件限制。AGENTS.md增加網頁狀態顯示規則，優先輕量快照分流、單筆在途與逾時處理；200ms不作為通用固定值。
+- **已實作與提案：**程式沿用2d62a2c，這次只修改文件／規則；事件紀錄、SSE／WebSocket僅說明替代方案，未實作。未以推論取代實測，舊回應亂序是程式風險而非已證實實機根因。
+- **驗證：**講義全部18張Mermaid圖已使用11.13.0實際解析，18/18通過；未做Typora／VS Code視覺布局驗證。純文件修改，不重跑程式測試；先前20個Python與2組JavaScript測試結果見前次紀錄，實機反應良好由使用者本次回報。
+- **影響／部署／回復：**不需上傳ESP32；講義與後續協作設計優先規則改變。以2d62a2c可取得本次文件修改前版本。留在refactor/led-single-owner本機提交，未合併或推送GitHub。
+
+## CHG-20261007-002｜LED網頁狀態獨立快速輪詢，避免舊感測回應覆蓋
+
+- **類別：**BUG。
+- **日期／開始時間：**2026-10-07 13:01:16 +08:00。
+- **桌面測試／內容紀錄時間：**2026-10-07 13:04:21 +08:00。
+- **現象：**使用者回報實機紅閃開始約2秒後網頁才顯示警示／disable按鈕1，因效果已結束，提示瞬閃又恢復可操作。未取得HTTP時間線或ESP32排程量測，不能確認所有延遲來源。
+- **確認的程式風險：**LED提示綁每秒/api/data；該端點包含感測資料處理，前端setInterval可使多筆請求重疊。較舊回應可能在較新回應之後更新LED。這不表示owner的busy檢查失效，提示與實際控制權應區分。
+- **作法：**新增/api/led/status，只複製LedService RAM快照、不操作ADC／DHT／SPI／GPIO，回no-store。前端LED獨立完成後等200ms輪詢，單筆在途Promise共用；感測完成後等1000ms再取並防重疊，不再由感測回應更新LED或因感測失敗覆蓋LED通道。切色後亦刷新快速LED狀態。
+- **逾時／資料生命週期：**LED請求1秒未完成用AbortController中止，顯示未知並停用；Promise.race忽略逾時後晚到回應，成功新快照才恢復。在途請求結束釋放Promise與timer；不持續累積setInterval請求。不變更命令佇列、owner仲裁或實體按鈕規則。
+- **驗證：**20個Python測試通過，Microdot實際路由驗證新端點不調用ADC與no-store；原網頁JavaScript測試與新增延遲fetch測試通過，涵蓋慢感測不擋警示、舊感測不重新啟用、單筆在途、Abort逾時、晚到忽略與恢复。未實機重測、瀏覽器布局或HTTP延遲量測。講義新增通道圖，全部17張Mermaid圖已使用11.13.0實際解析，17/17通過。
+- **影響與限制：**正常情況LED輪詢更密集、每頁最多約5次每秒，仍有HTTP與事件迴圈延遲，不保證200ms內更新。同步阻塞、WiFi或背景節流仍可能延遲，不能宣稱2秒根因完全解決；後端拒絕政策保持權威，未知狀態不放行。
+- **文件／部署／回復：**LED_SINGLE_OWNER_GUIDE.md新增案例8A分流機制；更新web_server.py、index.html後重啟並強制刷新瀏覽器。不需更改config.py。回復4778911可取得原前端／API，須成對部署。本次留在refactor/led-single-owner本地提交，未推送。
+
+## CHG-20261007-001｜以案例與分層圖解深化單一 owner 講義
+
+- **類別：**需求變更（教學內容深化）。
+- **日期／開始時間：**2026-10-07 02:57:54 +08:00。
+- **內容紀錄時間：**2026-10-07 03:02:08 +08:00；16張Mermaid圖已於提交前確認解析通過。
+- **需求與驗證來源：**使用者回報目前實機測試情況良好，要求降低認知負荷，詳細說明要素、邏輯與實際情境。實機時間、逐項測試與壓力數據未提供，不推論所有情境已驗證；本次沒有程式變更。
+- **教學順序：**LED_SINGLE_OWNER_GUIDE.md 改成角色→資料→初始化→案例→進階附錄，前半先教提出要求、受理窗口、待辦清單、唯一工作者與GPIO工具，再對應實際函式。原完整規格保留於附錄供查表，不要求初次一次理解全部欄位。
+- **資料機制：**分清命令、正常狀態、effect、receipt與實際GPIO；說明submit在來源task執行，run在唯一owner task執行，但共用同一LedService物件。queue與results引用同一receipt，來源拿副本，結果查詢再複製；queue移除不會立即刪掉結果，最近16筆之外才過期。
+- **新增案例：**實體按鈕按下、ADC900觸發、兩事件接近同時、紅閃第三次期間按下並按住、網頁刷新前誤送POST、閃完後1100解除。各主案例有初始假設、Mermaid時序圖、函式／參數與資料位置、狀態表、最終結果及自我檢查。
+- **競爭情境分解：**按鈕已執行則警示保存新綠色；按鈕已受理仍排隊則警示受理把它標rejected/alert_started，恢復舊藍色；警示先受理則按下被消耗或submit回busy。強調accepted不等於executed，不把感覺同時誤當同時執行，也不把所有拒絕路徑都說成產生命令ID。
+- **保留課堂易錯點：**busy=false不等於armed=true；首次受理時busy已生效但effect可能仍None；持續按住不會在警示後補執行；必须警示後取樣ADC>=1100再ADC<1000。約20ms是檢查節奏、300ms是亮滅階段，不把理想時間表誤當精準實機量測。
+- **驗證範圍：**逐項对照現有LedService、Button、tasks、main與Web程式。講義共有16張Mermaid圖，已使用11.13.0實際解析全部區塊，16/16通過。未做Typora／VS Code視覺布局驗證。純文件修改，不重跑程式測試；先前20個桌面測試及使用者實機回報仍按來源區分。
+- **部署／回復：**無需重新上傳ESP32。留在refactor/led-single-owner本地提交，未合併或推送；原講義可由da7f007取得比較。先前卡鈍觀察不在此次處理範圍，沒有宣稱修正。
+
+## CHG-20261006-012｜單一 LED owner 與命令仲裁實驗
+
+- **類別：**需求變更（架構教學與獨立分支實驗）。
+- **日期／開始時間：**2026-10-06 23:32:51 +08:00。
+- **驗證／紀錄時間：**2026-10-06 23:46:02 +08:00。
+- **需求：**使用者要求把多元控制單一LED方案寫成講義與Mermaid圖，再切分支實作，評估理解、實作與功能穩定性。不是處理卡鈍；先前卡鈍仍待觀測。
+- **基線與狀態：**由乾淨main的88ca2fb建立refactor/led-single-owner；只本地實驗、未合併／推送。73d693f與light-led-alert-validated-20261006仍可回復已確認功能。
+
+### 討論結論與實作
+
+1. **責任集中：**新增services/led_service.py與套件__init__.py。RgbLed改為只轉色碼到GPIO且避免重複輸出；初始化安全熄燈後，正常操作与關機輸出都由唯一LedService.run流程執行。main只建立owner與提出停止，不直接寫GPIO。
+2. **生產者：**實體按鈕與Web提交cycle，光照提交low_light_alert；既有MQTT改色分支亦提交set_color以避免留下旁路，但不修改既有MQTT callback接線，也未broker實機驗證。來源不讀改寫正常色碼，不執行效果。
+3. **仲裁：**同步submit只做受理控制面，無await／GPIO；普通命令FIFO上限8。受理警示即reserved=true，將尚未執行的普通receipt改rejected/alert_started並清除，避免警示後補執行；忙碌時新改色與新警示立即拒絕、不排隊。cycle是相對變更，兩次不合併。警示先於待執行改色，已執行命令不撤銷。
+4. **雙層狀態：**正常色碼／亮滅與effect分開；effect保存phase、次數、階段時間、原狀與receipt。owner每20ms讓出排程，每輪最多4筆，使用ticks_diff推進亮滅。延遲時每輪最多一個效果轉換，不跳過肉眼可見階段，可能延長總時間。五次完成先恢復GPIO，再解除busy並標executed。
+5. **結果與生命週期：**receipt有id、kind、source、status、reason；受理副本不會自動變完成，最近16筆結果保留RAM可查，重啟清空。accepted→executing→executed；亦可能rejected、failed、cancelled。記錄可過期，查不到不等於未執行。有界清單不依賴uasyncio.Queue套件，不可從IRQ／thread直接使用。
+6. **Web：**POST既有/api/led/toggle回202與ID表示受理，而非已改色；busy409、queue_full429、停止／未初始化503。新增GET /api/led/commands/<int:command_id>；前端區分受理、執行、後續拒絕、過期与斷線未知，不等待警示完成才回HTTP。每秒狀態快照仍顯示警示忙碌並停用按鈕。
+7. **停止與錯誤：**request_stop停止受理／拒絕待處理；owner finally標未完效果cancelled、熄燈並set stopped Event。main等待owner完成清理。GPIO錯誤標failed並退出；硬體若連熄燈也失敗，不能承諾實際輸出。只有同一迴圈、經命令入口的來源才符合此所有權約定。
+8. **保持功能政策：**完整五次期間拒絕改色、按鈕須放開重按；光照armed仍需警示結束後ADC>=1100才重新允許，再ADC<1000才觸發，未加冷卻或連續確認。未採背景改色／通用搶占，維持先前確認需求。
+
+### 講義、理解成本與替代方案
+
+- 新增LED_SINGLE_OWNER_GUIDE.md，以四張圖表示要素、HTTP受理到結果、警示競爭時機與狀態機，說明參數來源、快取生命週期、仲裁表、部署與驗收。旧LIGHT_LED_ALERT_GUIDE.md加版本提示，保留token方案供比較。
+- 講義說明critical section、一致性、所有權、仲裁是互補層次；非同步for+await不阻塞整個迴圈也可取消，本次選狀態機是集中仲裁，不是將其誤當無法中斷。
+- 可讀性初步判斷：硬體與來源更簡單、責任集中；owner增加有界佇列、狀態機與結果協定，整體不一定更短，初學者需理解accepted不等於executed。是否更容易教學或實機更穩定仍需驗收，未宣稱結論已成立。
+- 未選等待式Lock（會延後操作）、背景desired更新（會不恢復原狀）與泛用優先權搶占框架（目前規則不需要）；單一owner本身不能替代仲裁政策。
+
+### 驗證與可觀察差異
+
+- **20個Python測試通過：**FIFO、兩次cycle、預約警示競爭、拒絕待執行／新命令、完整五次／熄滅恢復、tick回繞、延遲不跳階段、容量／歷史上限、取消／關機、GPIO錯誤、實際main錯誤後owner清理、真正Button去彈跳拒絕與PIR／RFID回歸。固定隨機種子1000輪混合命令加200輪收尾驗證有界與結束。以本專案Microdot TestClient驗證實際路由202、結果查詢與429，另驗證handler409／404。
+- **網頁JavaScript模擬測試通過：**受理／執行、受理後拒絕、busy停用、重啟可用以及原RFID／PIR顯示。未真實瀏覽器布局、ESP32 SPI/GPIO、broker或實機壓力驗證。
+- **Mermaid：**原暫存解析器依賴缺損，另在暫存目錄建立mermaid11.13.0+jsdom，四張圖實際解析4/4通過；未做Typora／VS Code視覺布局驗證，不增加專案執行依賴。
+- **差異：**白色7改由owner於完整初始化後首次渲染，WiFi／NTP／MQTT等待期間LED保持安全熄滅；Web受理成功從200改202；正常命令至少等待owner下一輪，不再同步完成。這些需納入實機驗收。
+
+### 部署與回復
+
+部署main.py、tasks.py、web_server.py、index.html、hardware/led.py與services整個目錄，保留已確認Button、PIR／RFID／sensors及私人config.py。本次未新增配置，既有LIGHT_ALERT_*沿用。重啟重新載入HTML。詳見新講義。
+
+實驗不推送或合併。回復git switch main後須整套部署main/tasks/web_server/index與hardware/led，不可混用舊token控制器和新owner介面；私人配置未改。旧services可留在裝置，但舊main不匯入。每次提交包含此紀錄，實際commit由Git查詢。
+
 ## CHG-20261006-011｜講義強調光照警示的重新允許条件
 
 - **類別：**需求變更（教學說明補充）。

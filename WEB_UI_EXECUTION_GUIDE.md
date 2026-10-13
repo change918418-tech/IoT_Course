@@ -1,6 +1,6 @@
 # 物聯網軟體架構講義：Web 畫面、按鈕與資料生命週期
 
-**適用案例：**本專案目前的 ESP32／MicroPython、Microdot、原生 HTML／JavaScript 與 MQTT 實作。**整理日期：**2026-10-05。這是獨立講義，不是變更紀錄；不修改應用程式或 ChangeLog。
+**適用案例：**本專案目前的 ESP32／MicroPython、Microdot、HTML／CSS／JavaScript、uPlot 本機資產與 MQTT 實作。**整理日期：**2026-10-11 23:23:20 +08:00。這是獨立講義，不是變更紀錄；若程式行為改變，應同步修正文中的對應說明。
 
 本講義依目前程式逐步追蹤。圖中成功情境不代表已做實機驗證；現有缺陷另列在各節，避免把預期設計當成已實現功能。行號以整理當時為準，之後可依函式名稱查詢。
 
@@ -15,13 +15,15 @@
 | 溫度卡片 | `tempCard`，第 210 行 | 同上 | 同一個 `data.temp`，不是第二次量測 |
 | 狀態區的濕度 | `humidity`，第 199 行 | 同上 | `data.humidity` |
 | 濕度卡片 | `humidityCard`，第 215 行 | 同上 | 同一個 `data.humidity` |
-| 光照卡片 | `lightCard`，第 220 行 | 同上 | `data.light`，原始 ADC 值 |
+| 光照目前值 | `lightCard`，第 220 行 | 同上 | `data.light`，原始 ADC 值 |
+| 光照歷史圖 | `lightChart`，uPlot Canvas | `updateLightChart()` | 最近 80 次有效 ADC；一般 Y 軸 0～2048，超過 2048 時擴展至 4095 |
 | 狀態文字 | `status`，第 203 行 | 初始 HTML／資料更新例外 | 初始為正常；catch 時改為連接失敗 |
+| 移動偵測與喇叭狀態 | `motionMessage`、`motionHistory`、`motionCount`、`musicStatus` | `updateMotionStatus()` | `GET /api/motion/status`，只讀PIR／喇叭RAM快照，不等待DHT、ADC或SPI |
 | 按鈕 1：切換 LED | 第 226 行，`onclick="toggleLED()"` | 使用者 click | `POST /api/led/toggle`，循環下一個色碼 |
-| 按鈕 2：發布資料 | 第 227 行，`onclick="publishData()"` | 使用者 click | `POST /api/publish`，設定發佈事件 |
-| 發佈成功／失敗視窗 | JavaScript `alert()` | 發佈按鈕處理 | 依 HTTP 結果或 fetch 例外，沒有追蹤 MQTT 最終結果 |
+| 按鈕 2：發布資料 | 第 227 行，`onclick="publishData()"` | 使用者 click | `POST /api/publish`，受理後設定發佈事件 |
+| 發佈狀態視窗 | JavaScript `alert()` | 發佈按鈕處理 | 解析 JSON `accepted`／`published`／錯誤；不把 `accepted` 宣稱為 MQTT 已完成 |
 
-畫面沒有 LED 色碼欄位、裝置時間欄位或歷史圖。OLED 顯示時間，但它不參與 Web DOM 更新。頁尾「每 1 秒」是固定文字，真正的計時來自 JavaScript 的 `setInterval()`。
+畫面目前沒有 LED 色碼欄位或裝置時間欄位；光照卡片使用本機部署的 uPlot 顯示最近 80 次歷史折線。OLED 顯示時間，但它不參與 Web DOM 更新。頁尾「每 1 秒」是固定文字，真正的計時來自 JavaScript 的輪詢排程。
 
 ## 2. 先分清楚兩個執行世界
 
@@ -65,12 +67,10 @@ sequenceDiagram
     participant MQTT as MqttManager
     participant Web as web_server 模組
     participant Scheduler as uasyncio
-    Entry->>Scheduler: run(main())
-    Scheduler->>Init: await initialize_system()
-    Init->>HW: RgbLed() 與 on(7)
-    Init->>HW: Button(17) 與 Button(21)
-    Init->>HW: Dht11Sensor() 與 LightSensor()
-    Init->>HW: dht_sensor.measure()
+    Entry->>HW: RgbLed()、Button(17/21)、DHT、LightSensor()
+    Init->>Snapshot: 建立 SensorSnapshot
+    Init->>Controller: 建立 LedController 與 CommandService
+    Init->>HW: 初次 DHT 量測，更新 Snapshot
     Init->>WiFi: await connect_wifi()
     WiFi-->>Init: ssid, password
     Init->>WiFi: await sync_time()
@@ -90,48 +90,43 @@ sequenceDiagram
 
 | 呼叫位置 | 被呼叫的程式 | 實際參數／來源 | 產生的狀態 |
 |---|---|---|---|
-| `main.py:157` | `uasyncio.run(main())` | `main()` 產生的 coroutine | 主事件迴圈執行主協程 |
-| `main.py:29` 初始化 | `RgbLed()` | 呼叫者不傳參數；類別讀 `config` 的 GPIO 37／35／33 | 三個 Pin、索引 0、`is_on=False` |
-| 初始化下一步 | `rgb_led.on(7)` | 常數 7，白色 | GPIO 三色開啟；索引變 7 |
-| 初始化按鈕 | `Button(config.BUTTON1_PIN)` 等 | 17／21 來自設定 | 按鈕 Pin 輸入物件 |
-| 初始化感測 | `Dht11Sensor()` | 內部讀 `config.DHT11_PIN=18` | DHT driver；溫濕度先設 0.0 |
-| 初始化感測 | `LightSensor()` | 內部讀 `TEMT_ADC_PIN=8` | ADC、衰減設定；`current_value=0` |
-| 初次量測 | `dht_sensor.measure()` | 無外加參數；使用 `self.sensor` | 快取第一次量測結果，失敗則 -1／-1 |
-| 初始化網路 | `connect_wifi()` | 內部將 `WIFI_PROFILES`、`try_time=10` 傳給 `ns_tools.connect_to_known_wifi()` | WiFi 連線；回傳 SSID／密碼，不在講義揭露其值 |
-| 初始化 MQTT | `MqttManager(ssid, password, broker='broker.emqx.io')` | SSID／密碼由前一步回傳，Broker 由 main 指定 | client、連線旗標與另一個連線 Event |
-| `main.py:98` | `uasyncio.Event()` | 無參數 | `publish_event`，初始未設定 |
-| `main.py:111` | `uasyncio.gather(...)` | 各任務 coroutine，內含同一批物件參照 | 背景量測、顯示、發佈及 Web 等任務交錯執行 |
-| `web_server.py:227` | `web_server_task()` | 無參數；讀模組全域狀態 | 載入 HTML，啟動 HTTP 80 |
+| `main.py` | `uasyncio.run(main())` | `main()` 產生的 coroutine | 主事件迴圈執行主協程 |
+| 初始化 | `RgbLed()` | 類別讀 `config` 的 GPIO 37／35／33 | 三個 Pin，初始由 owner 控制 |
+| 初始化 | `Dht11Sensor()` | 內部讀 `config.DHT11_PIN=18` | DHT driver；last-good 初值為 `None` |
+| 初始化 | `LightSensor()` | 內部讀 `TEMT_ADC_PIN=8` | ADC；last-good 初值為 `None` |
+| 初次量測 | `dht_sensor.measure()` | 無外加參數；使用 `self.sensor` | 成功更新 SensorSnapshot，失敗保留空值並記錄 error |
+| 初始化網路 | `connect_wifi()` | 內部將 WiFi profiles 傳給工具 | WiFi 連線；回傳 SSID／密碼 |
+| 初始化 MQTT | `MqttManager(...)` | SSID／密碼與 Broker 由 main 指定 | client、連線旗標與連線 Event |
+| 主組裝 | `SensorSnapshot()` | 沒有硬體參照 | 感測 value、valid、quality、age、error |
+| 主組裝 | `LedController()`、`CommandService()` | RGB driver 與 controller 參照 | 唯一 LED owner 與共用命令入口 |
+| `web_server_task()` | Web 路由 | 讀 main 注入的共享參照 | HTML、SensorSnapshot、LED／MQTT API |
 
-WiFi 失敗時包裝函式可能只回傳預設 profiles；拿到 SSID／密碼不保證已連網。MQTT 初始嘗試完成後才啟動 gather，因此 Web 啟動時間受初始化等待影響。NTP 校時供時間顯示，Web API 的三個感測數值沒有時間欄位。
+WiFi 失敗時包裝函式可能只回傳預設 profiles；拿到 SSID／密碼不保證已連網。MQTT 初始嘗試完成後才啟動 gather，因此 Web 啟動時間受初始化等待影響。Web 感測查詢只讀 Snapshot，不直接重新量測。
 
 ### 3.2 相依物件如何傳給 Web 與任務
 
 ```python
-# main.py:98～105，現行程式
 publish_event = uasyncio.Event()
-web_server.mqtt_manager = mqtt_manager
-web_server.publish_event = publish_event
-web_server.dht_sensor = dht_sensor
-web_server.rgb_led = rgb_led
-web_server.light_sensor = light_sensor
+sensor_snapshot = SensorSnapshot()
+led_controller = LedController(rgb_led)
+command_service = CommandService(led_controller)
+web_server.sensor_snapshot = sensor_snapshot
+web_server.command_service = command_service
 ```
 
 ```mermaid
 flowchart TB
-    DHT[同一個 Dht11Sensor 物件]
-    MainDHT[main 的 dht_sensor] --> DHT
-    TaskDHT[dht11_read_task 的參數 dht_sensor] --> DHT
-    WebDHT[web_server.dht_sensor] --> DHT
-    E[同一個 publish_event 物件]
-    MainE[main 的 publish_event] --> E
-    TaskE[mqtt_publish_task 的參數 publish_event] --> E
-    WebE[web_server.publish_event] --> E
+    Snapshot[SensorSnapshot] --> Task[感測任務更新]
+    Snapshot --> Web[web_server.api_data]
+    Snapshot --> OLED[OLED presenter]
+    Command[CommandService] --> Controller[LedController]
+    Controller --> Driver[RgbLed／GPIO]
+    Main[main.py] --> Snapshot
+    Main --> Command
+    Main --> Web
 ```
 
-這些指定傳遞的是**物件參照**，沒有複製一份感測器。Web 讀到的屬性，就是背景量測任務更新的屬性。`self` 是 Python 呼叫物件方法時隱含傳入的接收者；例如 `rgb_led.next_color()` 沒有寫參數，但方法依然收到 `self=那個共享 LED 物件`。
-
-`web_server` 匯入時五個參照先為 `None`，main 才完成指定。相依注入的作用，是讓服務在接到 HTTP 前取得必要物件；目前方式是模組全域變數，未採獨立容器或 service 類別。
+這些指定傳遞的是物件參照，不會複製硬體或快照；但 Web 只讀 `SensorSnapshot.snapshot()` 的資料副本，不直接呼叫 DHT／ADC。
 
 ## 4. 第一次開啟網頁：Flash 檔案如何變成畫面？
 
@@ -169,6 +164,165 @@ sequenceDiagram
 | 瀏覽器解析 | HTML→DOM，CSS→樣式 | 建立 Browser 記憶體中的元素及初始 `--`／正常文字 |
 | 程式啟動 | `updateData(); setInterval(updateData, 1000);` | script 在 body 後端，前面的顯示節點已建立 |
 
+頁面另外請求兩個本機資產：`/assets/uplot/1.6.32/uPlot.iife.min.js` 與 `/assets/uplot/1.6.32/uPlot.min.css`。`web_server.py` 使用固定路由與 `Response.send_file()` 串流回應，不把函式庫併入 `HTML_PAGE`；兩個資產使用長效快取，因此更新函式庫版本時必須同步修改 URL 版本目錄、路由與部署檔案。
+
+### 4.1 uPlot 如何整合進 `index.html` 與 `web_server.py`
+
+本專案採「HTML 頁面與圖表函式庫分離部署」：`index.html` 只保留頁面結構、樣式與應用程式 JavaScript；uPlot 的 JavaScript／CSS 以固定版本檔案放在 `assets/`，再由 `web_server.py` 提供同源 HTTP 路由。這樣不需要 CDN、ESP32 不必在執行時連外下載函式庫，也不會把約 51 KB 的壓縮 JavaScript 複製進 `HTML_PAGE` 字串。
+
+#### A. `index.html` 的載入順序
+
+`index.html` 有兩個 uPlot 入口：
+
+```html
+<head>
+    <link rel="stylesheet" href="/assets/uplot/1.6.32/uPlot.min.css">
+</head>
+...
+<body>
+    ...
+    <script src="/assets/uplot/1.6.32/uPlot.iife.min.js"></script>
+    <script>
+        // 本頁應用程式 JavaScript
+    </script>
+</body>
+```
+
+瀏覽器處理順序如下：
+
+1. 先向 ESP32 的 `/` 或 `/index.html` 取得整份 HTML。
+2. 解析 `<link>` 時，再向同一個 ESP32 請求 `uPlot.min.css`；這個檔案提供 `.uplot`、Canvas 外框與內部元素的基本樣式。
+3. 解析到 body 底部的 `<script src=...>` 時，請求並執行 `uPlot.iife.min.js`。IIFE 版本會在瀏覽器建立全域 `uPlot` 建構函式。
+4. uPlot 載入完成後，才執行下一個 inline script；該 script 才能在 `createLightChart()` 中呼叫 `new uPlot(...)`。
+5. 頁面啟動 `updateData()`，之後以既有輪詢流程取得 `/api/data`。
+
+因此，uPlot 檔案不能只存在開發電腦，也不能只修改 HTML 的 `<script>` 路徑；ESP32 檔案系統與 `web_server.py` 路由必須同時存在。若 JavaScript 資產遺失、路徑拼錯或函式庫未成功執行，`typeof uPlot !== 'function'`，`createLightChart()` 會回傳失敗，畫面顯示「圖表元件載入失敗」；感測文字仍可能更新，因為文字資料與圖表初始化是兩條前端流程。
+
+#### B. 光照資料如何進入 uPlot
+
+光照圖不是由 ESP32 產生圖片，也不是由 `/api/data` 回傳 SVG。ESP32 只回傳數字，瀏覽器保留短期歷史並交給 uPlot 繪製：
+
+```text
+GET /api/data
+  → response.json().light
+  → updateLightChart(value)
+  → lightHistory（瀏覽器 RAM，最多80筆）
+  → getLightChartData()
+  → uPlot.setData()
+  → Canvas 折線
+```
+
+`updateLightChart(value)` 的資料邊界是：
+
+| 步驟 | 實作 | 目的 |
+|---|---|---|
+| 數字化 | `Number(value)`，非有限值直接不新增樣本 | 避免 `null`、文字或 `NaN` 污染圖表 |
+| ADC 限制 | `Math.max(0, Math.min(4095, numeric))` | 將前端顯示限制在 ADC 合理範圍 |
+| 加入歷史 | `lightHistory.push(...)` | 保存本頁瀏覽期間的有效樣本 |
+| 滑動視窗 | 超過 `LIGHT_HISTORY_LIMIT = 80` 時 `shift()` | 限制瀏覽器 RAM 與 Canvas 資料量 |
+| 組合 uPlot 資料 | X 軸為 `0...n-1`，Y 軸為歷史 ADC 複本 | 符合 uPlot 的 `[xValues, yValues]` 格式 |
+
+歷史只存在瀏覽器 RAM；重新整理、關閉頁面或重新開啟另一個分頁都會重新從空陣列開始，不寫入 ESP32 Flash，也不改變 `/api/data` 契約。
+
+#### C. uPlot 圖表設定與兩個 Y／X 軸邊界
+
+`createLightChart()` 只建立一次 `lightChart`。建立時設定 Canvas 寬度、280 px 高度、光照序列顏色、隱藏點標記、隱藏 legend／cursor，以及 Y 軸刻度與水平虛線。資料更新時不重建 DOM，而是呼叫 `setData()` 和 `setScale()`：
+
+```javascript
+const chartData = getLightChartData();
+lightChart.setData(chartData, false);
+lightChart.setScale('x', {
+    min: 0,
+    max: Math.max(1, chartData[0].length - 1)
+});
+lightChart.setScale('y', {
+    min: 0,
+    max: getLightChartMax()
+});
+```
+
+X 軸使用 `auto: false` 與 identity `range` 函式，再由 `renderLightChart()` 明確設定目前的 `0～n-1`。這個細節很重要：若只使用 `setData(..., false)` 而讓 X 軸停留在初始 `0～1`，新增資料會落在可視區域外，畫面看起來就像只連了前兩個點。資料超過 80 筆後，陣列移除最舊值，X 軸仍維持 `0～79`，因此畫面是最近 80 筆的滑動視窗。
+
+Y 軸則故意不採資料自動縮放：
+
+- 所有歷史值都不大於 2048：範圍固定為 `0～2048`，刻度為 `0、512、1024、1536、2048`。
+- 任一歷史值大於 2048：範圍擴展為 `0～4095`，刻度為 `0、1024、2048、3072、4095`。
+- 新樣本若超過 4095，先限制到 4095；因此不會破壞圖表比例。
+
+`setScale('y')` 的明確範圍與 `getLightAxisSplits()` 的刻度函式分工不同：前者決定可視數值上下限，後者決定水平網格線與文字刻度位置。這就是「常態聚焦 2048 以下，但高值出現時仍看得到完整 ADC 範圍」的實作。
+
+#### C.1 亮暗遲滯線
+
+圖表另外使用 uPlot 的 `hooks.draw` 在 Canvas 上畫兩條紅色實線；門檻不是前端自行決定，而是由同一輪 `/api/data` 的 `light_thresholds` 傳入：
+
+| 圖線 | API 欄位 | 目前裝置／範例值 | 控制意義 |
+|---|---|---:|---|
+| `暗 <trigger>` | `data.light_thresholds.trigger` | 裝置 `config.py`：500；公開範例：1000 | ADC 嚴格低於 trigger 時，允許提交一次低光 LED 警示。 |
+| `亮 <reset>` | `data.light_thresholds.reset` | 目前裝置與公開範例：1100 | ADC 回升至 reset 以上時，重新 armed，允許下一次低光警示。 |
+
+前端收到門檻後，`updateLightThresholds()` 保存數字；`drawLightThresholds()` 使用 `chart.valToPos(value, 'y', true)` 把 API 值轉為目前 Y 軸的 Canvas 座標，再畫完整寬度的紅色實線，並在右側動態標示實際數字。當 Y 軸切換到 4095 時，兩條線仍依 API 回傳的 ADC 值重新定位，不會跟著資料平均或移動。若初次回應尚未包含有效門檻，圖表不繪製門檻線；後續成功回應取得門檻後才顯示，既有門檻則在暫時缺欄位時保留。
+
+因此亮暗緩衝區不是固定寫死的 `1000～1099`；目前裝置設定為 `500～1099`，公開設定範例則為 `1000～1099`。圖線只提供操作邊界的視覺提示，不會取代後端 LED owner 的低光遲滯判斷。
+
+#### D. 更新與縮放生命週期
+
+1. `updateData()` 成功解析 JSON 後，先執行 `updateLightThresholds(data.light_thresholds)`，再更新溫度、濕度、光照目前值與 `updateLightChart(data.light)`。
+2. 第一次有效光照值會建立 uPlot；等待資料時顯示 `lightChartEmpty`。
+3. 後續值使用 `setData()` 更新既有圖表，避免每秒重新建立 Canvas。
+4. `window.resize` 事件呼叫 `resizeLightChart()`，依容器寬度執行 `setSize()`；不重新建立 uPlot，也不清除歷史資料。
+5. uPlot 載入失敗時只停用圖表，不會把感測文字輪詢或 LED／RFID／移動偵測流程改成依賴圖表。
+
+#### E. `web_server.py` 如何提供 uPlot 檔案
+
+`web_server.py` 的 `load_html()` 只讀取根目錄 `index.html` 到 `HTML_PAGE`；uPlot 資產不在啟動時讀成 Python 字串。兩個固定路由使用 Microdot 的 `Response.send_file()`：
+
+```python
+@app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')
+async def uplot_javascript(request):
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.iife.min.js',
+        content_type='application/javascript; charset=utf-8',
+        max_age=31536000)
+
+@app.route('/assets/uplot/1.6.32/uPlot.min.css')
+async def uplot_stylesheet(request):
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.min.css',
+        content_type='text/css; charset=utf-8',
+        max_age=31536000)
+```
+
+這裡有四個設計重點：
+
+1. **同源路徑：**HTML 使用相對根路徑，瀏覽器與 `/api/data` 使用同一個 ESP32 origin，不需要 CORS 或外部網路。
+2. **串流檔案：**`send_file()` 直接從檔案回應資產，不把壓縮 JavaScript／CSS 併入 `HTML_PAGE`；這降低 HTML 複製與啟動時的額外記憶體壓力。
+3. **正確 MIME type：**JavaScript 回 `application/javascript; charset=utf-8`，CSS 回 `text/css; charset=utf-8`，瀏覽器才會依資產用途解析。
+4. **長效快取與版本路徑：**`max_age=31536000` 允許瀏覽器長期快取；升級 uPlot 必須建立新的 `assets/uplot/<版本>/`、修改 HTML URL、增加對應路由並同步上傳，不能在相同 URL 直接替換內容後期待所有瀏覽器立即取得新檔。
+
+#### F. ESP32 部署檢查表與故障定位
+
+最小檔案集合如下：
+
+```text
+index.html
+web_server.py
+assets/uplot/1.6.32/uPlot.iife.min.js
+assets/uplot/1.6.32/uPlot.min.css
+assets/uplot/1.6.32/LICENSE
+```
+
+瀏覽器開發者工具可依下表定位問題：
+
+| 現象 | 優先檢查 |
+|---|---|
+| 頁面完全不是新版本 | ESP32 的 `HTML_PAGE` 是否因未重啟仍保留舊內容；瀏覽器是否需要強制重新整理 |
+| 感測文字正常、圖表顯示「圖表元件載入失敗」 | uPlot JavaScript 路由、檔案路徑、檔案是否真的上傳；Network 是否取得 HTTP 200 |
+| 圖表有框但樣式異常 | `uPlot.min.css` 路由與 MIME type；瀏覽器是否被舊快取污染 |
+| 圖表只顯示兩點 | 確認使用目前 `renderLightChart()` 的 X 軸明確 `setScale()` 邏輯，而不是只呼叫 `setData(..., false)` |
+| 圖表超過 2048 被截斷 | 確認 Y 軸歷史資料有使用 `getLightChartMax()` 切換至 4095，且前端未錯誤固定在 2048 |
+
+這個整合的責任邊界是：`web_server.py` 負責把 HTML／uPlot 靜態資產與 JSON API 送到瀏覽器；`index.html` 負責保存光照短期歷史、決定刻度與呼叫 uPlot；uPlot 只負責在瀏覽器 Canvas 中繪圖，不讀 GPIO、不直接呼叫 MicroPython，也不保存裝置端歷史。
+
 `request` 在目前這些 handler 中沒有被讀取；URL 路由負責選函式。`0.0.0.0` 是伺服器綁定所有 IPv4 介面的地址，不是學生應在瀏覽器輸入的目的 IP；實際目的 IP 由 WiFi 取得並印在序列日誌。
 
 **HTML 的生命週期：**Flash 原始檔不因請求結束而刪除。RAM 中 `HTML_PAGE` 保持存在直到重新指定或程式／裝置重啟。上傳新 HTML 並不保證既有 RAM 快取或已開啟頁面會自動更新；目前沒有重新載入 API，通常需要重啟裝置並重新載入頁面。
@@ -192,23 +346,24 @@ sequenceDiagram
         alt 量測成功
             Obj->>Driver: temperature() 與 humidity()
             Driver-->>Obj: 數值
-            Obj->>Obj: 更新 self.temperature 與 self.humidity
+            Obj->>Snapshot: update_dht(result)
         else 量測例外
-            Obj->>Obj: 設 temperature=-1，humidity=-1
+            Obj->>Snapshot: update_dht(None, error)
         end
-        Obj-->>Task: tuple(temp, humi)
+        Snapshot-->>Task: last-good／valid／quality／age
         Task->>Task: await sleep(config.DHT11_POLL_INTERVAL_SEC)
     end
 ```
 
 | 呼叫 | 參數怎麼拿到 | 回傳／寫入 |
 |---|---|---|
-| `tasks.dht11_read_task(dht_sensor)` | main 將初始化的 DHT 物件當參數 | 一直執行的協程 |
-| `dht_sensor.measure()` | 無外加參數；從 self 找到 driver | tuple；更新兩個物件屬性 |
-| driver `temperature()`／`humidity()` | 使用最近一次 driver 量測 | 溫度與相對濕度 |
+| `tasks.dht11_read_task(dht_sensor, sensor_snapshot)` | main 注入兩個共享物件 | 一直執行的協程 |
+| `dht_sensor.measure()` | 無外加參數；從 self 找到 driver | tuple 或 `None`；保留 last-good |
+| `sensor_snapshot.update_dht(...)` | task 將結果與 error 傳入 | 更新 value、valid、quality、age、error |
 | `sleep(config.DHT11_POLL_INTERVAL_SEC)` | 設定值 2 | 讓出執行權，等待下一輪 |
 
-這裡是**最新值快取**，沒有保存歷史串列。新量測覆蓋舊屬性；舊數值若沒有其他參照就可被回收。注意現行程式失敗會寫 -1；雖然註解說「最後成功資料」，實作未保留 last-good，也沒有時間／品質標記。tuple `(-1,-1)` 仍是真值，所以任務的 `if result` 不會以此判定失敗。
+這裡是**最新有效值快取**，由 `SensorSnapshot` 保存 last-good value 與品質欄位。量測失敗不覆寫有效值，而是將該欄位標為 `valid=false`、`quality=error`，並更新 `error`／`age_ms`。
+
 
 ### 5.2 第二條：瀏覽器取快取，更新兩組顯示
 
@@ -217,18 +372,13 @@ sequenceDiagram
     participant Timer as 瀏覽器呼叫或計時器
     participant JS as index.updateData
     participant API as web_server.api_data
-    participant DHT as 共享 Dht11Sensor
-    participant Light as 共享 LightSensor
+    participant Snapshot as SensorSnapshot
     participant DOM as 畫面 DOM
     Timer->>JS: updateData()，不傳參數
     JS->>API: fetch('/api/data')，GET，無 body
-    API->>DHT: get_current_temperature() 讀 temperature
-    DHT-->>API: temp
-    API->>DHT: get_current_humidity() 讀 humidity
-    DHT-->>API: humidity
-    API->>Light: get_current_light() 呼叫 read()
-    Light-->>API: light
-    API->>API: round(temp,1)、round(humidity,1)、組 JSON 字串
+    API->>Snapshot: snapshot()
+    Snapshot-->>API: temp／humidity／light 與 quality／age
+    API->>API: round(temp,1)、round(humidity,1)、組 JSON
     API-->>JS: Response，application/json#59; charset=utf-8
     JS->>JS: await response.json()，得到 data
     JS->>DOM: temp 與 tempCard 的 textContent
@@ -236,14 +386,54 @@ sequenceDiagram
     JS->>DOM: lightCard 的 textContent
 ```
 
-`get_current_temperature()` 和 `get_current_humidity()` 在 `web_server.py:61`／`:71`，它們不呼叫 `measure()` 或 `get_data()`，而是直接讀取同一 DHT 物件的屬性。HTTP 請求本身不重新量測 DHT。
+`api_data()` 只讀 `SensorSnapshot`，不呼叫 DHT 或 ADC。感測任務負責更新值；Web 回應同時提供舊有 `temp`／`humidity`／`light` 欄位，以及 `sensor` 內的 `valid`、`quality`、`age_ms` 與 `error`。
 
 成功回應範例（假設當次數值）：
 
 ```json
-{"temp":26,"humidity":60,"light":950,"status":"ok"}
+{"temp":26,"humidity":60,"light":0,"sensor":{"status":"ready","sample_seq":42},"light_thresholds":{"trigger":500,"reset":1100},"status":"ready"}
+```
+其中`light_thresholds`由`web_server.py`讀取`config.LIGHT_ALERT_TRIGGER_ADC`與`config.LIGHT_ALERT_RESET_ADC`後序列化；前端不得直接讀取Python設定檔。
+
+### 5.1 LED、RFID、移動偵測的最近紀錄
+
+同一份`/api/data`也帶回控制與輸入的RAM快照；`/api/led/status`則提供LED的快速、不快取版本。這些歷史不是資料庫，裝置重啟後會清空：
+
+為避免完整`/api/data`讀取DHT／ADC等慢感測時延遲移動提示，`index.html`另以`MOTION_POLL_MS = 1000`獨立輪詢`GET /api/motion/status`。此路由只複製`motion_state`的RAM快照，設定`Cache-Control: no-store`；前端每一通道一次只保留一筆在途請求，完成後才排下一筆。
+
+| API欄位 | 內容 | 上限與畫面用途 |
+|---|---|---|
+| `led.alert_flash_count` | 已完成的低光警示事件次數 | 每完成一組`LIGHT_ALERT_BLINK_COUNT`次閃紅才加1；警示尚未完整閃完時不增加。 |
+| `led.alert_flash_total` | 一個警示事件內的閃紅次數 | 來源為`config.LIGHT_ALERT_BLINK_COUNT`，目前通常為5；不是事件次數。 |
+| `led.alert_flash_log` | 每個已完成事件的`{"sequence": 1, "time": "YYYY-MM-DD HH:MM:SS"}`紀錄 | 裝置RAM保留最近5個事件；時間是整組閃紅完成時間，LED區以`閃紅序號：時間`逐行顯示。 |
+| `rfid.recent_reads` | `{"uid": "...", "read_at": "YYYY-MM-DD HH:MM:SS"}`格式的成功讀卡紀錄 | 只保留最近5次；RFID卡區顯示`卡號：讀卡時間`。 |
+| `motion.recent_detections` | PIR經非同步防抖後的有效移動時間字串 | 以`PIR_HIGH_DEBOUNCE_MS`確認穩定高電位、以`PIR_LOW_REARM_MS`確認穩定低電位；只保留最近5次，移動偵測卡區逐行顯示`移動序號：時間`。 |
+
+目前設定為`PIR_POLL_INTERVAL_MS = 100` ms、`PIR_HIGH_DEBOUNCE_MS = 200` ms、`PIR_LOW_REARM_MS = 1500` ms。一次偵測觸發後，持續高電位或短暫低／高抖動不會重複計數；只有低電位穩定達重新武裝時間後，下一次穩定高電位才會形成新事件。`MOTION_DETECTED_HOLD_MS = 5000`只控制網頁`detected`顯示保持時間，不是事件去重時間。1500 ms是目前在避免同一次手部靠近重複觸發與縮短再次偵測等待之間的折衷值。
+
+例如回應中的相關部分可為：
+
+```json
+{
+  "led": {
+    "alert_flash_count": 1,
+    "alert_flash_total": 5,
+    "alert_flash_log": [
+      {"sequence": 1, "time": "2026-10-12 12:00:05"}
+    ]
+  },
+  "rfid": {
+    "recent_reads": [
+      {"uid": "0102030404", "read_at": "2026-10-12 12:00:02"}
+    ]
+  },
+  "motion": {
+    "recent_detections": ["2026-10-12 12:00:03"]
+  }
+}
 ```
 
+`index.html`不自行累積這三類事件；LED以`/api/led/status`、RFID以`/api/data`、移動／喇叭以`/api/motion/status`成功快照重繪`ledFlashHistory`、`rfidHistory`與`motionHistory`。因此前端顯示的5筆上限與裝置端RAM上限一致，也不會因瀏覽器重新整理而保留舊資料。
 前端 `index.html:238` 的核心程式：
 
 ```javascript
@@ -258,7 +448,7 @@ document.getElementById('tempCard').textContent = temp;
 |---|---|---|
 | `'/api/data'` | JavaScript 固定路徑 | 依目前頁面 URL 的 origin 發出請求，沒有指定外部 Broker |
 | Python `request` | Microdot | 代表這次 HTTP；handler 不使用其中參數 |
-| `temp`／`humidity` | DHT 屬性 | API 的區域名稱，沒有反向修改感測屬性 |
+| `temp`／`humidity` | `SensorSnapshot` 欄位 | API 的區域名稱，沒有反向修改感測快照 |
 | `1` | `round(value,1)` 的常數 | 四捨五入到一位小數，不代表提高感測精度 |
 | `response_json` | Python 字串串接 | 這次回應正文 |
 | JS `response` | fetch Promise 完成值 | 瀏覽器 Response，與 Python Response 是不同物件 |
@@ -270,32 +460,31 @@ document.getElementById('tempCard').textContent = temp;
 
 **更新不等於清空：**一次 fetch 結束後，JS 區域物件在沒有其他參照時可被垃圾回收；DOM 中已寫入的文字仍保留，直到下一次更新或頁面被替換。ESP32 快取也不因查詢被清除。HTTP 請求結束後，框架不再需要的 request／response 可釋放，確切時點由版本及 GC 決定。
 
-## 6. 光照：API 會額外進行一次 ADC 讀取
+## 6. 光照：背景任務更新 Snapshot，API 只讀快照
 
 ```mermaid
 flowchart TB
     BG[背景 light_sensor_task] -->|約每 50ms 呼叫 read| Read[LightSensor.read]
-    HTTP[GET /api/data] --> API[api_data]
-    API --> Helper[get_current_light]
-    Helper -->|目前物件有 read 方法| Read
     Read --> ADC[adc.read]
     ADC --> Result{讀取成功嗎}
-    Result -->|成功| Store[覆蓋 self.current_value]
-    Result -->|例外| Old[保留 self.current_value]
-    Store --> Return[回傳 current_value]
-    Old --> Return
-    Return --> JSON[API 的 light 欄位]
+    Result -->|成功| Store[SensorSnapshot.update_light]
+    Result -->|失敗| Error[SensorSnapshot 保留 last-good 並記錄 error]
+    Store --> Snapshot[SensorSnapshot]
+    Error --> Snapshot
+    HTTP[GET /api/data] --> API[api_data]
+    API --> Snapshot
+    Snapshot --> JSON[API 的 sensor.light 欄位]
     JSON --> JS[updateData 的 data.light]
     JS --> DOM[lightCard.textContent]
 ```
-
-目前 `LightSensor` 有 `read()`，因此 `get_current_light()` 的其他分支不會走到。真實參數是初始化時的 `Pin(8)` 與 `ADC.ATTN_11DB`；每次 `read()` 不再傳 Pin，ADC 物件已保留初始化設定。
-
-成功時 `self.current_value` 被新 ADC 整數取代；ADC 讀取失敗時 `LightSensor.read()` 捕捉例外並回傳先前值，沒有附帶「這次其實讀取失敗」的訊號。Web helper 若沒有可用感測物件或自身失敗，則可能回傳 0。
+成功時 `SensorSnapshot.update_light()` 更新 light value、valid、quality 與 updated time；失敗時保留 last-good value 並記錄 error。`api_data()` 只讀快照，不會為了 HTTP 請求再觸發 ADC。
 
 網頁顯示的是 raw ADC，不是 lux。此專案以 0～4095 解讀 ADC；實際量測範圍與校正須依板型／韌體確認。`get_brightness_percent()` 未被 Web 呼叫，沒有將資料轉成百分比。
 
-`LIGHT_AUTO_CONTROL_ENABLED=False` 時，背景任務仍讀 ADC，只是不依亮度修改 LED。所以「停止自動照明」不會讓網頁光照欄位停止更新。
+圖表只在瀏覽器 RAM 保存最近 80 筆資料，重新整理頁面後清空；它不寫入 ESP32 Flash，也不改變 `/api/data` 的資料契約。
+
+`LED_CONTROL_MODE='AUTO'` 時，背景光感任務可提交 `low_light_alert`；`MANUAL` 時該命令被拒絕，但光照資料仍照常更新。
+
 
 ## 7. 一秒輪詢與「正常／連接失敗」如何運作
 
@@ -342,42 +531,40 @@ sequenceDiagram
     participant Browser as onclick 與 toggleLED
     participant App as Microdot
     participant Route as api_led_toggle
-    participant LED as RgbLed
+    participant Command as CommandService
+    participant Controller as LedController
     participant GPIO as 三個 Pin
     User->>Browser: click 網頁按鈕 1
-    Browser->>Browser: toggleLED()，無參數
     Browser->>App: fetch('/api/led/toggle', method=POST)
     App->>Route: api_led_toggle(request)
-    Route->>LED: next_color()，隱含 self
-    LED->>LED: next_index=(current_color_index+1)%8
-    LED->>LED: set_color_by_index(next_index)
-    LED->>GPIO: red.value(r)、green.value(g)、blue.value(b)
-    LED->>LED: 更新 current_color_index 與 is_on
-    LED-->>Route: 回傳 next_index，但 route 未使用
-    Route-->>Browser: JSON status=ok，message=LED next_color
-    Browser->>Browser: response.ok 為 True 時 console.log
+    Route->>Command: submit('cycle','web')
+    Command->>Controller: submit_command(request_id, kind, source)
+    Controller-->>Route: accepted 或 rejected receipt
+    Route-->>Browser: JSON receipt，HTTP 202／拒絕狀態
+    Controller->>GPIO: LedController.run() 在 frame 寫入 RGB
+    Browser->>Browser: response.json() 顯示受理／拒絕
 ```
 
-圖中為 LED 物件及方法存在且無例外的路徑。若不存在，現行 route 仍可能回 `status=ok`，實際並未操作。
+HTTP handler 只提交命令；LED 的 queue、AUTO／MANUAL、busy 與 GPIO 寫入都由 `CommandService`／`LedController` 負責。`accepted` 代表進入有界記憶體，不代表已完成 GPIO 寫入。
 
 ### 8.2 逐層參數與資料
 
 | 順序 | 程式位置／呼叫 | 代入的參數 | 參數來源／結果 |
 |---|---|---|---|
-| 1 | `index.html:226` 的 onclick | `toggleLED()` 不傳參數 | HTML 指定 callback；沒有讀輸入欄位 |
-| 2 | `index.html:266` 的 fetch | 路徑、`{method:'POST'}` | 固定字串／物件；沒有 body，也沒有色碼 |
-| 3 | Microdot→`web_server.py:163` | `request` | 框架依 POST／path 生成並派發 |
-| 4 | `api_led_toggle()` | 讀全域 `rgb_led` | main 初始化注入的同一物件 |
-| 5 | `RgbLed.next_color()` | 隱含 `self` | 當前色碼來自物件記憶體，不來自 Browser |
-| 6 | `set_color_by_index(next_index)` | 計算的新整數 | `(old+1)%8`；再以 `%8` 正規化 |
-| 7 | `Pin.value(r/g/b)` | 0 或 1 | 從色碼位元取出；更新 GPIO 輸出 |
-| 8 | Python Response | 成功 JSON 字串與 header | 沒回傳新色碼／顏色，前端也不解析正文 |
-| 9 | `response.ok` | 瀏覽器 Response 的屬性 | True 時只記 console，沒有更新網頁 LED 欄位 |
+| 1 | `index.html` 的 onclick | `toggleLED()` 不傳參數 | HTML 指定 callback；沒有讀輸入欄位 |
+| 2 | `index.html` 的 fetch | 路徑、`{method:'POST'}` | 固定 POST；沒有 body，也沒有色碼 |
+| 3 | Microdot→`web_server.py` | `request` | 框架依 POST／path 生成並派發 |
+| 4 | `api_led_toggle()` | `kind='cycle'`、`source='web'` | Web adapter 轉成內部命令 |
+| 5 | `CommandService.submit()` | kind、source、value | 產生 request ID，呼叫 `LedController` |
+| 6 | `LedController.submit_command()` | normalized command | 驗證模式、顏色、busy 與 queue 容量 |
+| 7 | `LedController.run()` | 20 ms frame | 套用命令、更新 desired／applied、呼叫 RGB driver |
+| 8 | Python Response | receipt JSON 與 HTTP status | `202` 只代表 accepted；拒絕回傳原因 |
+| 9 | `response.json()` | 瀏覽器 Response 的 JSON | 前端顯示受理／拒絕；狀態另由 `/api/led/status` 查詢 |
 
 ### 8.3 位元理論與具體例子
 
 ```python
-next_index = (self.current_color_index + 1) % 8
+index = desired_color
 r = (index >> 2) & 1
 g = (index >> 1) & 1
 b = index & 1
@@ -398,11 +585,9 @@ b = index & 1
 
 若開機目前為 7，click 會算 `(7+1)%8=0`，三個 GPIO 熄滅；再 click 得 1，藍色持續；再 click 得 2，綠色持續。GPIO 暫存器保持所寫電位，不需要 HTTP 持續連線來保持顏色。
 
-**名稱不要混淆：**JavaScript 叫 `toggleLED()`，HTTP path 也叫 toggle，但實際 Python 呼叫 `next_color()`，沒有呼叫 `RgbLed.toggle()`。後者才是開／關切換；路徑名稱不能取代對程式的追蹤。
+**名稱不要混淆：**JavaScript 仍叫 `toggleLED()`，HTTP path 仍叫 `/api/led/toggle`，但 Python 現在先呼叫 `CommandService.submit('cycle', 'web')`，再由 `LedController.run()` 在 frame 中套用命令。
 
-`current_color_index` 在下一次換色／設定時被覆寫；`off()` 只關輸出並把 `is_on=False`，目前不清除色碼。裝置重啟會重建物件，再由 main 設成白色 7。光感自動控制預設關閉時不會覆寫顏色，若另行開啟則仍可能在亮處熄燈。
-
-實體按鈕 1 走 `tasks.button1_task()`，最後也呼叫同一 `next_color()`，但網頁 click 不會經過 `Button.wait_press()`／去彈跳，不會生成那組實體按鈕按下／釋放日誌。
+`LedController` 分離 `desired_color`、`enabled`、`mode` 與 `applied_output`。`AUTO` 可由光感提交低光警示並在完成後恢復 desired state；`MANUAL` 會拒絕光感覆蓋命令。實體按鈕與 Web 都只產生命令，不直接寫 RGB GPIO。
 
 ## 9. 按鈕 2：HTTP 觸發事件，背景任務發佈 MQTT
 
@@ -419,12 +604,12 @@ sequenceDiagram
     Route->>Route: 檢查 mqtt_manager 與 publish_event 是否存在
     Route->>Event: set()，沒有 payload
     Note over Event: 只設定旗標，喚醒等待任務
-    Route-->>JS: status=ok，message=Data published
-    JS->>JS: response.ok 為 True 時 console.log 與 alert
-    Note over JS,Event: HTTP 成功提示與 MQTT 結果沒有確認連線
+    Route-->>JS: HTTP 202，status=accepted，含 request_id
+    JS->>JS: 解析 JSON，顯示「請求已受理」
+    Note over JS,Event: HTTP 受理不等於 MQTT 發佈完成；結果由狀態 API 另查
 ```
 
-目前 handler 的檢查是物件存在，不是 `is_connected()`；不存在時也只印警告並回成功。圖示只涵蓋存在分支。路由內沒有取得溫濕度、沒有將讀值存入 Event，也沒有直接呼叫 `mqtt_manager.publish()`。
+路由現在檢查 `mqtt_manager`、`publish_event` 與連線狀態；不可用時回 JSON `status=unavailable` 與 HTTP 503。可用時 `request_publish()` 產生 request ID、設定 Event，回 HTTP 202／`status=accepted`。`GET /api/publish/status` 讀取最近狀態；前端目前只顯示受理或錯誤，不持續輪詢最終狀態。
 
 ### 9.2 後半段：誰真的讀資料與發送？
 
@@ -436,8 +621,8 @@ sequenceDiagram
     participant Manager as MqttManager
     participant Client as mqtt_as.MQTTClient
     participant Broker as MQTT Broker
-    Task->>Manager: await wait_connected(timeout_sec=30)
-    Manager-->>Task: True 或 False，目前 Task 沒檢查
+    Task->>Manager: await wait_connected()
+    Manager-->>Task: True 或 False；False 時任務停止
     loop 發佈事件循環
         Task->>Event: await wait()
         Event-->>Task: set 後允許繼續
@@ -451,24 +636,24 @@ sequenceDiagram
         Client->>Broker: socket 傳送 topic 與 payload
         Client-->>Manager: 返回，QoS0 沒有 PUBACK 等待
         Manager-->>Task: 正常 True；捕捉例外則 False
-        Task->>Task: 印發佈成功或失敗日誌
+        Task->>Manager: 更新 publishing／published／failed 狀態
         Task->>Event: clear()，清除旗標
         Task->>Task: await sleep_ms(100)
     end
 ```
 
-兩張時序圖是兩條獨立工作的路徑，**不得串成「HTTP 一定先回覆，然後 MQTT 才開始」**。set 後任務可在事件迴圈下一個排程機會繼續，實際網路完成先後依排程與 I/O 決定。確定的是 route 沒有等待 MQTT 結果。
+兩張時序圖是兩條獨立工作的路徑，**不得串成「HTTP 一定先回覆，然後 MQTT 才開始」**。set 後任務可在事件迴圈下一個排程機會繼續，實際網路完成先後依排程與 I/O 決定。HTTP 只確認請求已受理；`/api/publish/status` 才提供背景任務最近觀察到的結果。
 
 ### 9.3 參數追蹤到函式庫
 
 | 層級 | 呼叫與參數 | 來源 | 保存／結果 |
 |---|---|---|---|
-| Browser | `publishData()` | click；無自訂參數 | async 呼叫範圍 |
-| HTTP | `fetch('/api/publish',{method:'POST'})` | 固定值 | 沒有傳溫度／濕度或 message |
-| Route | `api_publish(request)` | Microdot 解析該請求 | 讀共享物件，未讀 request body |
-| 通知 | `publish_event.set()` | main 建立與注入的 Event | 設定一個待處理條件 |
-| 任務 | `mqtt_publish_task(dht_sensor,mqtt_manager,publish_event)` | main 以三個相同物件參照呼叫 | 長期存在的協程 |
-| 取值 | `dht_sensor.get_data()` | 物件當時的兩個屬性 | tuple；不重新 measure |
+| Browser | `publishData()` | click；無自訂參數 | 解析 `/api/publish` JSON；`accepted` 顯示已受理 |
+| HTTP | `fetch('/api/publish',{method:'POST'})` | 固定值 | HTTP 202 表示受理；503 表示 unavailable |
+| Route | `api_publish(request)` | Microdot 解析該請求 | `request_publish()` 檢查連線、產生 request ID、設定 Event |
+| 狀態 | `GET /api/publish/status` | Browser 目前未持續輪詢 | 讀最近一次發佈狀態與 request ID |
+| 通知 | `publish_event.set()` | manager 受理請求後設定 | 設定一個待處理條件 |
+| 取值 | `sensor_snapshot.snapshot()` | 取最近快照；不重新 measure |
 | 組文 | `message = f'{config.DEVICE_NAME}：溫度：{temp}℃, 濕度：{humi}%'` | 裝置名稱來自 config，數值來自 get_data | task 區域字串 |
 | 主題 | `config.MQTT_TOPICS['temp_humi']` | bytes 設定 `b'nuu/csie/iot1133/TempHumi'` | 模組配置，可重用 |
 | 品質 | `qos=0` | task 固定傳入 | 不等待 QoS1 的 PUBACK |
@@ -509,32 +694,30 @@ Event 的 wait 是協程等待，沒有在 Python 無限輪詢旗標；它讓其
 
 | 層次 | 此程式觀察到什麼 | 能否保證下一層？ |
 |---|---|---|
-| HTTP 回應成功 | 路由走到回應，通常已 set Event | 不能保證 MQTT 已完成 |
-| manager 回 True | client 的 publish 正常返回 | QoS0 不能保證 Broker 確認接收 |
+| HTTP 回應 accepted | 路由確認請求可進入 RAM／Event，回 `request_id` | 不能保證 MQTT 已完成 |
+| manager／task 狀態 published | client 的 publish 正常返回；可由 `/api/publish/status` 觀察 | QoS0 不能保證 Broker 確認接收 |
 | Broker 收到並轉送 | 需要另觀察 Broker／訂閱者 | 不保證訂閱應用保存或處理完成 |
 | 訂閱者處理完成 | 需應用層確認／外部觀察 | 目前網頁沒有追蹤 |
 
 QoS0 是協定的 at-most-once 交付層級，不包含 PUBACK；本地 client 的重連重試策略也不能提升成「應用動作一定恰好一次」。retain=False 不要求 Broker 保留這次消息作為新訂閱者的最新值；Broker 是否額外寫日誌／資料庫是外部配置，不可由此推斷。相關語意見 [MQTT 3.1.1 規範](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html)。
 
-成功 alert 只看 HTTP `response.ok`，沒有等待背景發佈、沒有解析 result ID。用外部訂閱者收訊才可驗證消息確實抵达該訂閱者。實體按鈕 2 同樣只 `publish_event.set()`，共用背景任務，但不會觸發網頁 alert。
+前端在 `accepted` 時只顯示「發布請求已受理」；`published` 只有在其他客戶端查詢 `/api/publish/status` 或未來加入輪詢時才可觀察。用外部訂閱者收訊才可驗證消息確實抵達該訂閱者。實體按鈕 2 同樣只產生共用發佈事件，但不觸發網頁 alert。
 
 ## 10. 失敗分支：畫面提示不等於所有故障都被偵測
 
 | 情境 | ESP32／Browser 實際路徑 | 使用者可能看見 |
 |---|---|---|
-| DHT 量測失敗 | 寫入 -1／-1，API 仍組 `status=ok` | -1，status 仍正常 |
-| DHT 物件缺失 | helper 回 None，串接出 `"temp": None` | 非合法 JSON，`response.json()` 拋例外，顯示連接失敗 |
-| ADC 讀取例外 | sensor 回舊 current_value | 看似有數值，沒有 stale 訊號 |
+| DHT 量測失敗 | 目前 task 依既有感測器回傳值組 payload | 仍需依資料品質文件補強，不把本次 MQTT 修正當成 DHT 品質修正 |
 | 光照為 0 | Browser 的 `data.light || '--'` | 顯示 `--` 而不是 0 |
-| LED 物件不存在／沒有方法 | route 不執行 GPIO，但可能回 200／ok | console 顯示 LED 已切換 |
+| LED 物件不存在／沒有方法 | route 不執行 GPIO，回錯誤狀態 | 前端顯示發布／控制未完成 |
 | LED handler 拋例外 | 回 HTTP 500 | `response.ok=False`，toggleLED 目前沒有 else 提示 |
-| 發佈 handler 拋例外 | 回 HTTP 500 | publishData 沒有 else，通常不會 alert 失敗 |
-| 發佈物件未初始化 | route 印警告仍回 ok | 成功 alert，但 Event 可能没 set |
-| MQTT publish 等待／失敗 | 背景 task 等待或印失敗 | HTTP 成功 alert 可能早已顯示 |
-| fetch 網路例外 | 該 JavaScript catch 執行 | 資料區顯示失敗，或發佈按钮顯示失敗 alert |
+| 發佈 handler 拋例外 | 回 HTTP 500 JSON | `publishData` 解析錯誤並顯示失敗 |
+| 發佈物件未初始化或未連線 | route 回 HTTP 503／`status=unavailable` | 顯示 MQTT 狀態不可用 |
+| MQTT publish 等待／失敗 | 狀態 API 回 `publishing`／`failed` | `accepted` alert 不代表最終成功 |
+| fetch 網路例外 | 該 JavaScript catch 執行 | 發佈按鈕顯示失敗 alert |
 | 資料請求恢復成功 | 數字重新寫入，未重置 status | 新數值搭配舊失敗文字 |
 
-伺服器錯誤回應是手動將 `str(e)` 串進 JSON，未跳脫引號／換行，正文可能不合法。兩個按鈕不呼叫 `response.json()`，因此它們的成功判斷與正文內容脫鉤。这些是目前行為的說明，本講義沒有修正它們。
+伺服器 MQTT 發佈回應現在以 JSON 序列化，避免手動拼接錯誤正文；前端發佈按鈕解析 JSON。`/api/publish` 仍不等待背景 MQTT 結果，`/api/publish/status` 也只代表裝置本地 task 的最近觀察，不代表 QoS0 的 Broker ACK。
 
 `/api/status` 雖然有 `api_status(request)`，目前僅回固定 `{"status":"ok","message":"System running"}`，沒有 uptime，也沒有被網頁呼叫；`sensor_monitor_task()` 每 10 秒休眠，尚未做實際健康檢查。不要將兩者畫成現有狀態欄的資料來源。
 
@@ -548,11 +731,10 @@ QoS0 是協定的 at-most-once 交付層級，不包含 PUBACK；本地 client �
 | `config` 常數／topics | ESP32 模組記憶體，來源為檔案 | import 時執行指定 | 改值或重啟重新匯入 | 改 RAM 不自動寫回 Flash |
 | Microdot app 與 route mapping | ESP32 RAM | `Microdot()` 與 decorators | 結束／重建 app | 登記 handler，不等於已執行 HTTP |
 | `HTML_PAGE` | ESP32 模組 RAM | `load_html()` 的 read | 再次指定、重啟 | 關閉檔案不清它；通常不逐請求讀檔 |
-| DHT／ADC／LED 物件參照 | main、task 與 web 模組 | 初始化與注入 | 無參照／程式結束後可回收 | 多個名稱指向同一物件 |
-| DHT `temperature/humidity` | 感測物件屬性 | 初始化 0，量測更新 | 下一次量測覆寫，失敗寫 -1 | 沒有保存歷史／age |
-| ADC `current_value` | 光感物件屬性 | 初始化 0，成功 ADC 讀取 | 新成功讀取覆寫 | 失敗可保留舊值 |
-| LED `current_color_index/is_on` | LED 物件屬性 | 初始化／設定顏色 | 換色覆寫、off 改 is_on | 不因 HTTP 結束而消失 |
-| GPIO 輸出電位 | MCU 硬體暫存器／腳位 | `Pin.value(0/1)` | 下一次寫入、重設、失去供電等 | 與 Python 字串生命周期不同 |
+| DHT／ADC／LED 物件參照 | main、task 與 web 模組 | 初始化與注入 | 無參照／程式結束後可回收 | Web 只讀 Snapshot／controller snapshot |
+| `SensorSnapshot` | `services/sensor_snapshot.py` | 感測任務更新 last-good 與品質 | 重啟重建；欄位在 RAM | 包含 value、valid、quality、age、error |
+| LED controller state | `LedController` | CommandService 命令與 owner frame | 重啟重建；結果保留有界筆數 | desired／enabled／mode／applied 分離 |
+| GPIO 輸出電位 | MCU 硬體暫存器／腳位 | `LedController.run()` 呼叫 driver | 下一次寫入、重設、失去供電等 | 與 Python receipt 生命周期不同 |
 | Python HTTP request／Response／區域字串 | ESP32 handler／框架 | 每次請求解析、回應組裝 | 完成且無參照後可回收 | 沒有自動保存每筆歷史 |
 | 瀏覽器 Response／data | Browser JS | fetch 與 JSON 解析 | 協程結束且無參照後可回收 | 與 ESP32 物件不同 |
 | DOM 五個數值／status | Browser DOM | HTML 初值／textContent | 下次指定、重新載入／離開頁面 | 資料請求結束不會清文字 |
@@ -571,10 +753,10 @@ RAM 回收由 runtime／GC 決定，無參照不等於立即擦除記憶體。�
 |---|---|---|
 | Client／Server 與序列化 | fetch→HTTP→Python→JSON→JS | 跨機器只能交換訊息，不能共享物件指標 |
 | 路由／控制反轉 | `@app.route` 登記 handler | 使用者請求到來，由框架呼叫函式並給 request |
-| 相依注入與 alias | `web_server.dht_sensor=dht_sensor` | 背景寫入後，Web 能看到同一物件新值 |
+| 相依注入與快照 | `web_server.sensor_snapshot=sensor_snapshot` | 背景任務寫入後，Web 讀到同一 Snapshot 的新值 |
 | 取樣與快取 | DHT 約每 2 秒量測，Web 約每 1 秒查詢 | 兩次網頁刷新可能顯示相同 DHT 值 |
 | 命令與查詢 | GET data、POST LED／publish | 查詢輸出資料，命令要求改變狀態／觸發工作 |
-| 直接呼叫與事件解耦 | LED 直接 next_color；publish 先 set | 兩個按钮的完成路径與回覆能力不同 |
+| 共同命令入口 | Button／Web／MQTT／光感 → `CommandService` → `LedController` | 所有來源共用 request ID、驗證、queue 與結果語意 |
 | 協同多工 | uasyncio 的 await | 等網路／事件時其他任務仍可工作，同步長操作仍可阻塞 |
 | 位元／模數 | RGB 色碼與 `%8` | 8 色組合與 7→0 循環 |
 | 局部狀態與硬體状態 | LED 屬性／GPIO 寫入 | HTTP 結束後顏色仍保持 |
@@ -584,13 +766,25 @@ RAM 回收由 runtime／GC 決定，無參照不等於立即擦除記憶體。�
 
 `textContent` 寫的是文字，不將回傳值當 HTML 標籤解析；本案例更新現有 DOM，沒有重新取得整頁。[DOM textContent](https://developer.mozilla.org/en-US/docs/Web/API/Node/textContent)
 
+### uPlot 本機資產部署
+
+更新網頁圖表時，必須與 `index.html`、`web_server.py` 同步上傳：
+
+```text
+assets/uplot/1.6.32/uPlot.iife.min.js
+assets/uplot/1.6.32/uPlot.min.css
+assets/uplot/1.6.32/LICENSE
+```
+
+瀏覽器會從 ESP32 的固定 `/assets/uplot/1.6.32/` 路徑讀取資產，不使用 CDN。若只上傳 `index.html` 而漏掉資產，頁面仍可能顯示感測文字，但光照圖會顯示「圖表元件載入失敗」。更新版本時使用新的版本目錄與路由，避免長效快取繼續使用舊檔案。
+
 ## 13. 上課操作與討論題
 
 ### 實驗 A：觀察顯示資料流
 
 1. 確認板上程式啟動、取得 WiFi IP，再由同網段 Browser 開 `/`。
 2. 開啟開發者工具 Network，過濾 `api/data`，比較每次請求與 Response 正文。
-3. 對照 DOM：同一溫度更新兩個 ID；濕度也相同；光照只更新一個 ID。
+3. 對照 DOM：同一溫度更新兩個 ID；濕度也相同；光照目前值更新 `lightCard`，歷史資料同步更新 `lightChart` 的 uPlot Canvas。
 4. 觀察 DHT 兩秒取樣與一秒查询的差異；改變光線，對照 ADC。實際間隔以觀察結果為準。
 
 ### 實驗 B：觀察 LED 路徑

@@ -29,13 +29,18 @@ def load_task(name, **namespace):
 class PirMusicTests(unittest.IsolatedAsyncioTestCase):
     async def test_motion_hold_expiry_high_and_tick_wrap(self):
         period = 1 << 30
-        ticks = iter([period - 1000, 0, 3999, 4000, 4500, 10000, 10500])
-        levels = iter([True, False, False, False, True, True, False])
+        rearm_samples = config.PIR_LOW_REARM_MS // config.PIR_POLL_INTERVAL_MS + 1
+        tick_values = ([period - 100, 0, 100] +
+                       [200 + index * 100 for index in range(rearm_samples)] +
+                       [5300, 5400, 5500])
+        level_values = [True, True, True] + [False] * rearm_samples + [True, True, True]
+        ticks = iter(tick_values)
+        levels = iter(level_values)
         state = new_motion_state()
         snapshots = []
         async def sleep(_):
             snapshots.append(dict(state))
-            if len(snapshots) == 7:
+            if len(snapshots) == len(level_values):
                 raise StopCycles()
         clock = types.SimpleNamespace(ticks_ms=lambda: next(ticks),
             ticks_diff=lambda a, b: ((a - b + period // 2) % period) - period // 2)
@@ -43,15 +48,74 @@ class PirMusicTests(unittest.IsolatedAsyncioTestCase):
             get_current_time=lambda: ('2026-10-06', '二', '02:41:04'),
             uasyncio=types.SimpleNamespace(sleep_ms=sleep))
         with self.assertRaises(StopCycles):
-            await task(types.SimpleNamespace(is_motion=lambda: next(levels)), asyncio.Event(), state)
-        self.assertEqual([s['detected'] for s in snapshots], [True, True, True, False, True, True, False])
+            await task(types.SimpleNamespace(is_motion=lambda: next(levels)),
+                       asyncio.Event(), state)
         self.assertEqual(state['count'], 2)
         self.assertEqual(state['last_detected_at'], '2026-10-06 02:41:04')
+        self.assertEqual(state['recent_detections'], ['2026-10-06 02:41:04'] * 2)
         self.assertEqual(state['sensor_status'], 'ready')
         self.assertEqual(new_motion_state()['count'], 0)
+        self.assertEqual(new_motion_state()['recent_detections'], [])
+
+    async def test_motion_history_limits_to_five(self):
+        rearm_samples = config.PIR_LOW_REARM_MS // config.PIR_POLL_INTERVAL_MS + 1
+        levels = []
+        for _ in range(6):
+            levels.extend([True, True, True] + [False] * rearm_samples)
+        values = iter(levels)
+        ticks = iter(index * config.PIR_POLL_INTERVAL_MS for index in range(len(levels)))
+        cycles = 0
+        async def sleep(_):
+            nonlocal cycles
+            cycles += 1
+            if cycles == len(levels):
+                raise StopCycles()
+        task = load_task('pir_monitor_task',
+            time=types.SimpleNamespace(ticks_ms=lambda: next(ticks),
+                                       ticks_diff=lambda a, b: a - b),
+            get_current_time=lambda: ('2026-10-06', '二', '02:41:04'),
+            uasyncio=types.SimpleNamespace(sleep_ms=sleep))
+        state = new_motion_state()
+        with self.assertRaises(StopCycles):
+            await task(types.SimpleNamespace(is_motion=lambda: next(values)),
+                       asyncio.Event(), state)
+        self.assertEqual(len(state['recent_detections']), 5)
+        self.assertEqual(state['recent_detections'], ['2026-10-06 02:41:04'] * 5)
+
+
+    async def test_motion_rearm_requires_stable_low(self):
+        rearm_samples = config.PIR_LOW_REARM_MS // config.PIR_POLL_INTERVAL_MS + 1
+        levels = ([True, True, True, False] +
+                  [True, True, True] +
+                  [False] * rearm_samples +
+                  [True, True, True])
+        values = iter(levels)
+        ticks = iter(index * config.PIR_POLL_INTERVAL_MS for index in range(len(levels)))
+        cycles = 0
+        async def sleep(_):
+            nonlocal cycles
+            cycles += 1
+            if cycles == len(levels):
+                raise StopCycles()
+        clock = types.SimpleNamespace(ticks_ms=lambda: next(ticks),
+            ticks_diff=lambda a, b: a - b)
+        task = load_task('pir_monitor_task', time=clock,
+            get_current_time=lambda: ('2026-10-12', '一', '12:00:00'),
+            uasyncio=types.SimpleNamespace(sleep_ms=sleep))
+        state = new_motion_state()
+        with self.assertRaises(StopCycles):
+            await task(types.SimpleNamespace(is_motion=lambda: next(values)),
+                       asyncio.Event(), state)
+        self.assertEqual(state['count'], 2)
+        self.assertEqual(len(state['recent_detections']), 2)
 
     async def test_initial_high_and_edges_without_continuous_retrigger(self):
-        values = iter([True, True, False, True, True, False, True])
+        rearm_samples = config.PIR_LOW_REARM_MS // config.PIR_POLL_INTERVAL_MS + 1
+        levels = ([True, True, True, True] +
+                  [False] * rearm_samples +
+                  [True, True, True])
+        values = iter(levels)
+        ticks = iter(index * config.PIR_POLL_INTERVAL_MS for index in range(len(levels)))
         count = 0
         samples = 0
         class Event:
@@ -60,14 +124,18 @@ class PirMusicTests(unittest.IsolatedAsyncioTestCase):
                 count += 1
         async def sleep(ms):
             nonlocal samples
-            self.assertEqual(ms, 500)
+            self.assertEqual(ms, config.PIR_POLL_INTERVAL_MS)
             samples += 1
-            if samples == 7:
+            if samples == len(levels):
                 raise StopCycles()
-        task = load_task('pir_monitor_task', uasyncio=types.SimpleNamespace(sleep_ms=sleep))
+        clock = types.SimpleNamespace(ticks_ms=lambda: next(ticks),
+            ticks_diff=lambda a, b: a - b)
+        task = load_task('pir_monitor_task', time=clock,
+            get_current_time=lambda: ('2026-10-07', '三', '14:25:22'),
+            uasyncio=types.SimpleNamespace(sleep_ms=sleep))
         with self.assertRaises(StopCycles):
             await task(types.SimpleNamespace(is_motion=lambda: next(values)), Event())
-        self.assertEqual(count, 3)
+        self.assertEqual(count, 2)
 
     async def test_music_events_coalesce_and_cancel_silences(self):
         event = asyncio.Event()

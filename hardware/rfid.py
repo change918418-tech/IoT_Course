@@ -4,9 +4,9 @@ import config
 
 
 def new_rfid_state():
-    """RAM 中的最後讀取紀錄；重啟即清空，不代表卡片仍在感應區。"""
+    """RAM 中的最後讀取紀錄與最近5次卡號／時間；重啟即清空。"""
     return {'status': 'starting', 'last_uid': None,
-            'last_read_at': None, 'error': None}
+            'last_read_at': None, 'recent_reads': [], 'error': None}
 
 
 class RfidReader:

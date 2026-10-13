@@ -17,7 +17,7 @@ except ImportError:
     import json
 from hardware.rfid import new_rfid_state
 from hardware.motion import new_motion_state
-from hardware.led import LedBusyError
+import config
 
 # ==================== 全局變數 ====================
 
@@ -26,10 +26,10 @@ app = Microdot()
 # 由 main.py 設置的全局變數
 mqtt_manager = None
 publish_event = None
-dht_sensor = None
-rgb_led = None
-light_sensor = None  # ✅ 新增光照傳感器
-rfid_state = new_rfid_state()  # main 注入同一份 RAM 狀態；API 不操作 SPI
+sensor_snapshot = None
+command_service = None
+led_controller = None
+rfid_state = new_rfid_state()
 motion_state = new_motion_state()
 
 # HTML 頁面（從 index.html 導入）
@@ -67,44 +67,27 @@ def get_wifi_ip():
         return None
 
 
+def _sensor_field(name):
+    if sensor_snapshot is None:
+        return {'value': None, 'valid': False, 'quality': 'unavailable',
+                'age_ms': None, 'error': 'snapshot_unavailable',
+                'updated_at_ms': None}
+    return sensor_snapshot.snapshot()[name]
+
+
 def get_current_temperature():
-    """獲取當前溫度"""
-    try:
-        if dht_sensor:
-            return dht_sensor.temperature
-    except:
-        pass
-    return None
+    """Return the cached temperature; never trigger a DHT read."""
+    return _sensor_field('temperature')['value']
 
 
 def get_current_humidity():
-    """獲取當前濕度"""
-    try:
-        if dht_sensor:
-            return dht_sensor.humidity
-    except:
-        pass
-    return None
+    """Return the cached humidity; never trigger a DHT read."""
+    return _sensor_field('humidity')['value']
 
 
 def get_current_light():
-    """
-    獲取當前光照值 (ADC 值)
-    ✅ 修復：直接從 light_sensor 對象讀取
-    """
-    try:
-        if light_sensor:
-            # 如果 light_sensor 有 read() 方法，則調用它
-            if hasattr(light_sensor, 'read'):
-                return light_sensor.read()
-            # 如果 light_sensor 本身就是 ADC 對象，直接讀取值
-            elif hasattr(light_sensor, 'value'):
-                return light_sensor.value
-            else:
-                return light_sensor.read()
-    except Exception as e:
-        print(f"[Web] ⚠️ 讀取光照值異常: {e}")
-    return 0
+    """Return the cached ADC value; never trigger an ADC read."""
+    return _sensor_field('light')['value']
 
 
 # ==================== Web 路由 ====================
@@ -136,89 +119,198 @@ async def index_html(request):
     return Response(HTML_PAGE, headers={'Content-Type': 'text/html; charset=utf-8'})
 
 
+@app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')
+async def uplot_javascript(request):
+    """Serve the pinned local uPlot runtime without loading it into HTML_PAGE."""
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.iife.min.js',
+        content_type='application/javascript; charset=utf-8',
+        max_age=31536000)
+
+
+@app.route('/assets/uplot/1.6.32/uPlot.min.css')
+async def uplot_stylesheet(request):
+    """Serve the pinned local uPlot stylesheet."""
+    return Response.send_file(
+        'assets/uplot/1.6.32/uPlot.min.css',
+        content_type='text/css; charset=utf-8',
+        max_age=31536000)
+
+
 @app.route('/api/data')
 async def api_data(request):
-    """
-    API 端點：返回傳感器數據（JSON 格式）
-    ✅ 修復：添加光照值返回
-    返回：{ temp, humidity, light, status, rfid: 最後讀取狀態快照 }
-    """
-    #print("[Web] GET /api/data")
-    
-    temp = get_current_temperature()
-    humidity = get_current_humidity()
-    light = get_current_light()  # ✅ 獲取光照值
-    
-    # 格式化溫度和濕度到一位小數
+    """Return sensor and control snapshots without sampling hardware."""
+    snapshot = sensor_snapshot.snapshot() if sensor_snapshot is not None else {
+        'temperature': _sensor_field('temperature'),
+        'humidity': _sensor_field('humidity'),
+        'light': _sensor_field('light'),
+        'sample_seq': 0,
+        'status': 'unavailable',
+    }
+    temp = snapshot['temperature']['value']
+    humidity = snapshot['humidity']['value']
+    light = snapshot['light']['value']
     if temp is not None:
         temp = round(temp, 1)
     if humidity is not None:
         humidity = round(humidity, 1)
-    
-    # 序列化保證 None -> null，錯誤訊息中的引號也會正確跳脫。
     response_json = json.dumps({
-        'temp': temp, 'humidity': humidity, 'light': light,
-        'status': 'ok', 'rfid': dict(rfid_state), 'motion': dict(motion_state),
-        'led': {'alert_active': rgb_led.alert_active if rgb_led else False,
-                'available': rgb_led is not None,
-                'color_index': rgb_led.current_color_index if rgb_led else None,
-                'is_on': rgb_led.is_on if rgb_led else False}
+        'temp': temp,
+        'humidity': humidity,
+        'light': light,
+        'sensor': snapshot,
+        'light_thresholds': {
+            'trigger': config.LIGHT_ALERT_TRIGGER_ADC,
+            'reset': config.LIGHT_ALERT_RESET_ADC
+        },
+        'status': snapshot['status'],
+        'rfid': dict(rfid_state),
+        'motion': dict(motion_state),
+        'led': command_service.snapshot() if command_service else {
+            'available': False,
+            'mode': 'unknown',
+            'alert_active': False,
+        }
     })
-    
-    #print(f"[Web] API 返回: 溫度={temp}, 濕度={humidity}, 光照={light}")
-    
-    return Response(response_json, headers={'Content-Type': 'application/json; charset=utf-8'})
+    return Response(response_json, headers={
+        'Content-Type': 'application/json; charset=utf-8'})
+
+@app.route('/api/motion/status')
+async def api_motion_status(request):
+    """快速回傳PIR／喇叭RAM快照，不讀取DHT、ADC或SPI。"""
+    return Response(json.dumps(dict(motion_state)), headers={
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'})
+
+
+def _command_response(receipt):
+    status = 202 if receipt['status'] == 'accepted' else {
+        'busy': 409,
+        'manual_mode': 409,
+        'queue_full': 429,
+        'stopped': 503,
+        'invalid_command': 400,
+        'invalid_color': 400,
+        'invalid_mode': 400,
+        'invalid_source': 400,
+        'unavailable': 503,
+    }.get(receipt.get('reason'), 400)
+    return Response(
+        json.dumps(receipt),
+        status_code=status,
+        headers={'Content-Type': 'application/json; charset=utf-8'})
 
 
 @app.route('/api/led/toggle', methods=['POST'])
 async def api_led_toggle(request):
-    """
-    API 端點：切換 LED 顏色
-    返回：{ status: 'ok' }
-    """
+    """Submit a cycle command through CommandService."""
     print("[Web] POST /api/led/toggle")
-    
-    try:
-        if rgb_led is None:
-            return Response(json.dumps({'status': 'error', 'message': 'LED 未初始化'}),
-                            status_code=503, headers={'Content-Type': 'application/json; charset=utf-8'})
-        rgb_led.next_color()  # 控制器統一檢查，舊網頁也不能繞過
-        
-        response_json = '{"status": "ok", "message": "LED next_color"}'
-        return Response(response_json, headers={'Content-Type': 'application/json; charset=utf-8'})
-    
-    except LedBusyError as e:
-        return Response(json.dumps({'status': 'busy', 'message': str(e)}),
-                        status_code=409, headers={'Content-Type': 'application/json; charset=utf-8'})
-    except Exception as e:
-        print(f"[Web] LED 切換異常: {e}")
-        response_json = f'{{"status": "error", "message": "{str(e)}"}}'
-        return Response(response_json, headers={'Content-Type': 'application/json; charset=utf-8'}, status_code=500)
+    if command_service is None:
+        return _command_response({
+            'status': 'rejected',
+            'reason': 'unavailable',
+        })
+    return _command_response(command_service.submit('cycle', 'web'))
+
+
+@app.route('/api/led/commands', methods=['POST'])
+async def api_led_command(request):
+    """Submit a canonical Web LED command through CommandService."""
+    payload = request.json if request is not None else None
+    payload = payload if isinstance(payload, dict) else {}
+    if command_service is None:
+        return _command_response({
+            'status': 'rejected',
+            'reason': 'unavailable',
+        })
+    return _command_response(command_service.submit(
+        payload.get('kind'), 'web', payload.get('value')))
+
+
+@app.route('/api/led/mode', methods=['POST'])
+async def api_led_mode(request):
+    """Change AUTO／MANUAL mode through the same command boundary."""
+    payload = request.json if request is not None else None
+    payload = payload if isinstance(payload, dict) else {}
+    if command_service is None:
+        return _command_response({
+            'status': 'rejected',
+            'reason': 'unavailable',
+        })
+    return _command_response(command_service.submit(
+        'set_mode', 'web', payload.get('mode')))
+
+
+@app.route('/api/led/status')
+async def api_led_status(request):
+    """Fast controller snapshot; no sensor or GPIO operation."""
+    snapshot = command_service.snapshot() if command_service else {
+        'available': False,
+        'mode': 'unknown',
+        'alert_active': False,
+    }
+    return Response(json.dumps(snapshot), headers={
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'})
+
+
+@app.route('/api/led/commands/<int:command_id>')
+async def api_led_command_result(request, command_id):
+    receipt = command_service.result(command_id) if command_service else None
+    return Response(
+        json.dumps(receipt or {
+            'status': 'unknown',
+            'reason': 'expired_or_unknown'
+        }),
+        status_code=200 if receipt else 404,
+        headers={'Content-Type': 'application/json; charset=utf-8'})
 
 
 @app.route('/api/publish', methods=['POST'])
 async def api_publish(request):
     """
-    API 端點：發布溫濕度數據到 MQTT
-    返回：{ status: 'ok' }
+    API 端點：請求發布溫濕度數據到 MQTT。
+
+    202 只代表請求已受理；實際結果由 /api/publish/status 查詢。
     """
     print("[Web] POST /api/publish")
-    
+
     try:
-        if mqtt_manager and publish_event:
-            # 設置發布事件
-            publish_event.set()
-            print("[Web] ✅ 已觸發 MQTT 發布事件")
+        if mqtt_manager is None or publish_event is None:
+            payload = {'status': 'unavailable', 'error': 'mqtt_not_initialized'}
+            status_code = 503
         else:
-            print("[Web] ⚠️ MQTT 管理器未初始化")
-        
-        response_json = '{"status": "ok", "message": "Data published"}'
-        return Response(response_json, headers={'Content-Type': 'application/json; charset=utf-8'})
-    
+            payload = mqtt_manager.request_publish(publish_event)
+            status_code = 202 if payload['status'] == 'accepted' else 503
+
+        return Response(
+            json.dumps(payload),
+            status_code=status_code,
+            headers={'Content-Type': 'application/json; charset=utf-8'})
     except Exception as e:
         print(f"[Web] 發布異常: {e}")
-        response_json = f'{{"status": "error", "message": "{str(e)}"}}'
-        return Response(response_json, headers={'Content-Type': 'application/json; charset=utf-8'}, status_code=500)
+        payload = {'status': 'failed', 'error': str(e)}
+        return Response(
+            json.dumps(payload),
+            status_code=500,
+            headers={'Content-Type': 'application/json; charset=utf-8'})
+
+
+@app.route('/api/publish/status')
+async def api_publish_status(request):
+    """返回最近一次 MQTT 發佈請求的 accepted／published／failed 狀態。"""
+    if mqtt_manager is None:
+        payload = {'status': 'unavailable', 'error': 'mqtt_not_initialized'}
+        status_code = 503
+    else:
+        payload = mqtt_manager.publish_status()
+        status_code = 200
+    return Response(
+        json.dumps(payload),
+        status_code=status_code,
+        headers={
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store'})
 
 
 @app.route('/api/status')

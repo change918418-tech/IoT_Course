@@ -37,6 +37,8 @@ RFID_CS_PIN = 13
 # ==================== 感測器參數 ====================
 
 # 光感測器閾值
+# LED 控制模式：AUTO 允許光感低光警示；MANUAL 不由光感覆蓋使用者命令
+LED_CONTROL_MODE = 'AUTO'
 LIGHT_ALERT_ENABLED = True
 LIGHT_ALERT_TRIGGER_ADC = 1000  # 嚴格低於此值觸發一次
 LIGHT_ALERT_RESET_ADC = 1100    # 回升至此值以上才允許下一次
@@ -55,7 +57,10 @@ OLED_UPDATE_INTERVAL_SEC = 1
 RFID_POLL_INTERVAL_MS = 500
 
 # PIR 移動提示：每次低→高觸發，音符時間單位為秒
-PIR_POLL_INTERVAL_MS = 500
+PIR_POLL_INTERVAL_MS = 100
+PIR_HIGH_DEBOUNCE_MS = 200
+PIR_LOW_REARM_MS = 1500
+MOTION_DETECTED_HOLD_MS = 5000  # 網頁狀態顯示保持時間，不是PIR去重時間
 SPEAKER_DUTY = 512
 MOTION_MELODY = (('C4', 0.3), ('E4', 0.3), ('D4', 0.3),
                  ('G3', 0.3), ('REST', 0.2))

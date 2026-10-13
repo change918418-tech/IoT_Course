@@ -1,6 +1,9 @@
 # 光照紅燈警示：操作完整性與控制權
 
-本版由 `feature/light-led-alert` 開發，2026-10-06 使用者確認紅閃五次相關功能與觸發時機測試正確，授權合併至 `main` 並推送；以 `light-led-alert-validated-20261006` 標籤保存。此确认仅针对红闪功能，不代表全系統效能已驗證。
+> 本講義以目前 `refactor/architecture-foundation` 分支的 P1 實作為準：`SensorSnapshot`、`CommandService`、`LedController` 已整合按鈕、Web、MQTT 與光感來源。舊版 token／多入口設計保留作歷史比較，不可與目前程式介面混用。
+
+歷史紀錄中的 `feature/light-led-alert` 與 `light-led-alert-validated-20261006` 只保存舊版紅閃驗收背景；目前部署基準是 `refactor/architecture-foundation` 的 P1 commit `defafb6`。舊版驗證只針對紅閃功能，不代表全系統效能已驗證。
+公開 `config.example.py` 的示例門檻為 1000／1100；本機私人 `config.py` 可保留依裝置校準的 `LIGHT_ALERT_TRIGGER_ADC = 500`，部署時不得用公開範例覆蓋私人 WiFi／密碼或校準值。
 
 ## 操作規則與討論結論
 
@@ -35,33 +38,33 @@ ADC 嚴格低於 1000 時，保存 LED 正常色碼與亮滅狀態，紅亮 300 
 
 ## 為何不用等待式鎖
 
-若按鈕呼叫 `await lock.acquire()` 等待警示完成，按下操作會被延後執行，違反「拒絕、不排隊」。本版用同步忙碌檢查與擁有者 token：busy 時立即拒絕，沒有等待改色佇列。
+若按鈕呼叫 `await lock.acquire()` 等待警示完成，按下操作會被延後執行，違反「拒絕、不排隊」。目前由 `CommandService.submit()` 同步送入 `LedController`；警示一旦受理即設為 reserved，後續改色立即回覆 `rejected / busy`，不等待改色佇列。
 
-保證的前提是所有一般 GPIO 控制都經過同一個 `RgbLed`，在目前單一 `uasyncio` 事件迴圈執行。同步檢查和寫入之间沒有 await，其他協程不能在中間插入；若日後加入執行緒、IRQ 或直接操作 LED Pin，必須重新設計同步機制。Python 的私有命名只是介面約定，不是權限隔離。
+保證的前提是所有 LED 輸出都經過同一個 `LedController.run()`，且受理與owner在目前單一 `uasyncio` 事件迴圈執行。同步受理段沒有 await，其他協程不能在預約檢查與入列之間插入；若日後加入執行緒、IRQ 或直接操作 LED Pin，必須重新設計同步機制。Python 的私有命名只是介面約定，不是權限隔離。
 
 ## 呼叫鏈與狀態生命週期
 
-1. `main()` 建立 `light_alert_event`，將同一 LED 與 Event 交給 `light_sensor_task()`、`light_alert_task()`。
-2. 光照任務每 50 ms 讀 ADC。局部 `armed=True` 表示允許觸發；閾值符合且 LED 無警示時，同步呼叫 `rgb_led.begin_alert()`。
-3. `begin_alert()` 先檢查控制權，再保存 `(current_color_index, is_on)` 至 `_saved_state`，建立 `_alert_token=object()`。`alert_active` 立即為 true。這些操作及接著的 `alert_event.set()` 沒有 await，所以在閃爍任務真正取得排程之前，改色入口已被封鎖。`armed` 改 false。
-4. 警示任務 `await event.wait()`，收到後 clear Event，取當次 token。依配置重複 `alert_step(token, True)`、await 300 ms、`alert_step(token, False)`、await 300 ms 五次。
-5. `alert_step()` 檢查 token 身分與關機狀態，僅寫實際 GPIO。紅色索引 4（100），全滅 0；不更動正常色碼與 is_on，避免按鈕 0～7 循環被警示本身污染。
-6. `finally` 呼叫 `end_alert(token)`。仍是有效擁有者時，亮燈恢復色碼，熄燈恢復 0，但保留原選定色碼；恢復後才釋放快照與 token，重新接受改色。普通取消／例外也走此路徑。
-7. `main()` 清理用 `shutdown()`，而不是一般 off：設永久關機旗標、使 token 失效、清除快照並熄燈。晚到的 `alert_step/end_alert` 不再寫 GPIO，不會在關機後恢復顏色。下次程式重啟建立新物件。
+1. `main()` 建立 `SensorSnapshot`、`LedController`、`CommandService`，並安排唯一的 `led_controller.run()` owner task。
+2. `light_sensor_task()` 每 50 ms 讀 ADC；先更新 `SensorSnapshot`，只有讀值有效且 `armed=true`、低於 `LIGHT_ALERT_TRIGGER_ADC` 時，才呼叫 `CommandService.submit('low_light_alert', 'light')`。
+3. `CommandService` 產生 request ID，交給 `LedController.submit_command()`；警示受理時立即設定 `_reserved=true`，清除尚未執行的一般命令並回覆其 `alert_started`。
+4. owner 取到警示後建立 `_effect`，保存 `(_desired_color, _enabled)`；依 `LIGHT_ALERT_ON_MS`、`LIGHT_ALERT_OFF_MS` 與 `LIGHT_ALERT_BLINK_COUNT` 推進紅色 4／全滅 0。
+5. 警示完成後恢復保存的正常狀態，將 receipt 標為 `executed`，再解除 reserved；GPIO 只由 owner 寫入。
+6. `armed` 仍由光照 producer 管理：警示後讀到 `LIGHT_ALERT_RESET_ADC` 以上才重新允許下一次低光警示。
+7. `main()` 清理呼叫 `request_stop()`；owner 的 `finally` 取消未完成結果、熄燈並設定 stopped Event。下次重啟建立新物件。
 
-正常色碼、快照、token、Event 與 armed 都只在 RAM，不寫 Flash。警示期間取樣持續，但不重新允許或排隊警示；完成後只有再次取樣到解除閾值才 rearm。閾值1000／1100形成遲滯，避免在邊界附近反覆閃爍，仍需按實際光感測器校準。
+正常色碼、快照、effect 與 armed 都只在 RAM，不寫 Flash。警示期間取樣持續，但不重新允許或排隊警示；完成後只有再次取樣到解除閾值才 rearm。閾值由裝置 `config.py` 決定，公開範例為 1000／1100，私人裝置可保留已校準值。
 
-`LightSensor.read()` 與原版一樣，量測失敗時可能回傳上次值；本功能不新增 ADC 健康判斷。閃爍時間是非同步等待的設定值，受其他協程影響，非硬體精準 3 秒。
+`LightSensor.read()` 失敗時保留 last-good value，但 `light_sensor_task()` 會檢查 `last_error`，未知或失敗讀值不提交警示命令。閃爍時間是非同步設定值，受其他協程影響，非硬體精準 3 秒。
 
 ## 各操作入口
 
 | 入口 | 警示期間的處理 |
 |---|---|
-| 實體按鈕1 | `wait_press(reject_if=...)` 在最初按下與去彈跳期間記住 press_rejected。任務拒絕該次操作，但仍 await wait_release 消耗按下，直到放開後再按才執行。最後 `next_color()` 的控制器檢查仍防止警示開始的競爭時機。 |
-| 網頁按鈕1 | 每秒 `/api/data` 取得 led.alert_active，停用按鈕並顯示「紅燈警示中」。輪詢會延遲，故停用只屬使用者提示，不能作為唯一控制保障。 |
-| POST /api/led/toggle | 直接呼叫同一控制器；busy 時回 HTTP 409 與 JSON status=busy，不更改色碼、不排隊。舊頁面、其他客戶端及刷新間隙的請求亦受此檢查。LED 未初始化回 503。 |
-| MQTT 改色處理 | `set_color_by_index()` 同樣會拒絕，處理分支記錄未執行、不排隊；本次未做 broker 端到端驗證。 |
-| 系統清理 | `shutdown()` 優先，允許中止警示並熄滅。 |
+| 實體按鈕1 | `button1_task` 呼叫 `CommandService.submit('cycle', 'button1')`；警示預約或執行中回 `busy`，不排隊。 |
+| 網頁按鈕1 | 由 `/api/led/status` 快照顯示 `alert_active`；前端停用只屬提示，後端仍由 CommandService／LedController 驗證。 |
+| POST /api/led/toggle | 透過同一個 CommandService；接受回 HTTP 202，busy 回 409，queue full 回 429，未初始化／停止回 503。 |
+| MQTT 改色處理 | `MqttManager` 的同步 callback bridge 解析 `led:4`／`led=4`，交給 CommandService；桌面 adapter 已驗證，真 Broker／ESP32 尚未端到端驗證。 |
+| 系統清理 | `LedController.request_stop()` 停止受理；owner `finally` 取消未完成效果並寫入安全輸出 0。 |
 
 前端若資料連接失敗，停用 LED 按鈕並標示狀態未知。伺服器 busy 回覆後保持停用，下一次資料刷新且警示已結束才重新啟用。正常色碼／is_on API 表示保存的正常狀態，警示時並非當下红亮／全滅的 GPIO 值。
 
@@ -75,15 +78,15 @@ ADC 嚴格低於 1000 時，保存 LED 正常色碼與亮滅狀態，紅亮 300 
 | 等待式 mutex／Lock | 可協調共同資源，不必每次立即拒絕 | await 鎖會延後改色，違反本次不排隊語義；鎖本身不定義 UX、優先權及取消政策；未採用 |
 | 手動操作優先，中止紅閃 | 使用者可立即掌控 LED | 五次警示可能不完整，需說明中止並防止保存狀態覆蓋新操作；未採用 |
 | 任意操作直接寫 GPIO | 程式最少 | 紅／綠插入混淆、恢復競爭；不可滿足需求 |
-| 單一 LED 工作任務＋命令佇列 | 控制權集中，可擴充警示優先權、取消與多種效果 | 要設計忙碌拒絕、佇列、回應及期限，改造幅度較大；若效果持續增加可考慮，尚未實作 |
+| 單一 LED 工作任務＋命令佇列 | 控制權集中，已實作忙碌拒絕、警示預約、回應及期限；目前由 `LedController` 採用 |
 
 ## 部署、測試與恢復
 
-需上傳 `main.py`、`tasks.py`、`web_server.py`、`index.html`、`hardware/led.py`、`hardware/button.py`、`hardware/sensors.py`，並更新裝置私人 `config.py` 的非機密配置。公開範本同步新增：LIGHT_ALERT_ENABLED=True、TRIGGER_ADC=1000、RESET_ADC=1100、BLINK_COUNT=5、ON_MS=300、OFF_MS=300；實際完整名稱帶 LIGHT_ALERT_ 前綴。舊 LIGHT_AUTO_CONTROL_ENABLED 與 LIGHT_THRESHOLD_ON/OFF 已移除，新功能取代舊的自動亮滅模式。不要以公開 WiFi placeholder 覆蓋私人設定。重啟載入新 HTML 快取，再刷新瀏覽器。
+需上傳 `main.py`、`tasks.py`、`web_server.py`、`index.html`、`hardware/led.py`、`hardware/button.py`、`hardware/sensors.py`、`communication/mqtt_client.py`、`services/command_service.py`、`services/led_controller.py`、`services/sensor_snapshot.py` 與裝置私人 `config.py`。`config.py` 的 WiFi／密碼必須保留，只同步非機密設定；不要部署 `mdy_01/`、`mdy_02/` 或 `lib_backup/`。重啟載入新 HTML 與服務，再刷新瀏覽器。
 
 實機驗收：先選藍色，再遮光確認紅閃五次恢復藍；警示中按實體／網頁按鈕確認不變色且不延後執行；放開後重新按確認可改色；原先熄滅時警示完成也熄滅；持續暗不重複，變亮到1100以上後再遮暗可重觸發；期間刷 RFID、觸發 PIR 音樂、網頁刷新皆應繼續。中斷時確認熄燈。
 
-16 個 Python 與網頁 JavaScript 模擬測試通過；涵蓋五次輸出、正常／熄滅恢復、忙碌拒絕、HTTP409、去彈跳期間記住拒絕、hysteresis、無警示佇列、取消清理與 shutdown 防止晚到恢復，以及網頁停用／409／重新啟用。這些不是 ESP32 GPIO、實際時間與瀏覽器布局驗證。
+目前桌面驗證為 Python 33/33、`node tests/test_led_polling.cjs` 與 `node tests/test_rfid_ui.cjs` 通過；涵蓋 owner、AUTO 警示恢復、MANUAL 拒絕、last-good snapshot、未知光感不提交警示、bounded queue、request ID、Web command result 與 MQTT command adapter。這些不是 ESP32 GPIO、實際時間、真 Broker 或硬體電氣驗證。
 
 回復到原已確認的功能，乾淨工作目錄可執行：
 
@@ -91,13 +94,13 @@ ADC 嚴格低於 1000 時，保存 LED 正常色碼與亮滅狀態，紅亮 300 
 git switch -c restore-before-light-alert pir-music-web-validated-20261006
 ```
 
-再部署原應用檔案。Git 不恢復私人 config.py；舊版 hardware/sensors.py 引用舊 LIGHT_THRESHOLD_ON/OFF，回復時需從該版 config.example.py 恢復這些非機密設定及 LIGHT_AUTO_CONTROL_ENABLED=False，保留私人 WiFi。
+再部署原應用檔案。Git 不恢復私人 `config.py`；若回復舊版，必須同步使用該版本的 `main.py`、`tasks.py`、`web_server.py`、服務介面與公開配置欄位，並保留目前私人 WiFi／密碼。
 
 ## 已知待觀測事項與版本保存
 
 使用者回報移動偵測、實體按鈕等功能偶有卡鈍感受，尚未詳細觀測。未取得可重現步驟、時間量測或日誌，根因與是否和本次警示有關皆未確認，也尚未修正。依使用者指示本次先保存版本，後續再調查；不宣稱所有任務即時性或系統效能已正常。
 
-最新舊配置相容修正後，17 個桌面 Python 測試通過；先前網頁 JavaScript 模擬測試通過。本次合併僅更新驗證與待觀測紀錄，未再修改應用邏輯。
+目前 P1 回合已以 33/33 Python 測試、兩組 Node 前端測試與指定檔案 `py_compile` 驗證；仍未進行 ESP32 實機、真 Broker、外部訂閱者或硬體 GPIO 電氣驗證。
 
 要取回此次紅閃確認版，可在乾淨工作目錄執行：
 

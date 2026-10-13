@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IoT Web Server v1.2</title>
+    <link rel="stylesheet" href="/assets/uplot/1.6.32/uPlot.min.css">
     <style>
         * {
             margin: 0;
@@ -71,25 +72,67 @@
         
         .card-title {
             color: #764ba2;
-            font-size: 1.3em;
+            font-size: 1.45em;
             margin-bottom: 15px;
             font-weight: bold;
         }
         
         .card-value {
             color: #333;
-            font-size: 2em;
+            font-size: 2.2em;
             font-weight: bold;
             margin-bottom: 5px;
         }
         
         .card-unit {
             color: #999;
-            font-size: 0.9em;
+            font-size: 1em;
         }
 
-        #rfidUid { overflow-wrap: anywhere; font-size: 1.4em; }
+        .card p {
+            font-size: 1.1em;
+            line-height: 1.6;
+        }
+
+        .event-cards {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .light-card {
+            grid-column: 1 / -1;
+        }
+
+        .light-chart {
+            position: relative;
+            display: block;
+            width: 100%;
+            height: 280px;
+            margin: 10px 0 5px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            background: #fff;
+            overflow: hidden;
+        }
+
+        #lightChart .uplot {
+            width: 100%;
+            height: 100%;
+        }
+
+        .light-chart-empty {
+            position: absolute;
+            inset: 0;
+            display: grid;
+            place-items: center;
+            color: #999;
+            font-size: 14px;
+            pointer-events: none;
+        }
+
+        #rfidHistory { white-space: pre-line; overflow-wrap: anywhere; font-size: 1.25em; line-height: 1.6; }
         #rfidError { color: #b42318; overflow-wrap: anywhere; }
+        #ledFlashHistory { white-space: pre-line; overflow-wrap: anywhere; font-size: 1em; line-height: 1.5; }
+        #motionHistory { white-space: pre-line; overflow-wrap: anywhere; font-size: 1em; line-height: 1.5; }
         
         .buttons {
             display: grid;
@@ -102,7 +145,7 @@
             padding: 15px 30px;
             border: none;
             border-radius: 10px;
-            font-size: 1em;
+            font-size: 1.1em;
             font-weight: bold;
             cursor: pointer;
             transition: all 0.3s ease;
@@ -130,11 +173,13 @@
             border-radius: 10px;
             margin-bottom: 20px;
             border-left: 5px solid #667eea;
+            font-size: 1.1em;
         }
         
         .status-title {
             color: #667eea;
             font-weight: bold;
+            font-size: 1.25em;
             margin-bottom: 10px;
         }
         
@@ -155,6 +200,21 @@
         
         .status-value {
             color: #333;
+            font-weight: bold;
+            font-size: 1.15em;
+        }
+
+        .led-status {
+            background: #f0f0f0;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 5px solid #667eea;
+            font-size: 1.15em;
+        }
+
+        .led-status p {
+            min-height: 1.6em;
             font-weight: bold;
         }
         
@@ -220,59 +280,397 @@
                 <div class="card-value" id="humidityCard">--</div>
                 <div class="card-unit">相對濕度</div>
             </div>
-            <div class="card">
+            <div class="card light-card">
                 <div class="card-title">💡 光照</div>
                 <div class="card-value" id="lightCard">--</div>
-                <div class="card-unit">ADC 值</div>
+                <div id="lightChart" class="light-chart" role="img" aria-label="光照數值折線圖，Y軸依資料範圍顯示">
+                    <span id="lightChartEmpty" class="light-chart-empty">等待光照資料</span>
+                </div>
+                <div class="card-unit">ADC 值；一般顯示 0～2048，超過 2048 時擴展至 4095；折線保留最近 80 次讀值</div>
             </div>
         </div>
         
-        <div class="card" style="margin-bottom: 30px;">
-            <div class="card-title">📇 RFID 最後讀取紀錄</div>
-            <div class="card-value" id="rfidUid">尚未讀卡</div>
-            <p>讀取時間：<span id="rfidReadAt">--</span></p>
-            <p>讀卡任務：<span id="rfidStatus">等待資料</span></p>
-            <p id="rfidError"></p>
-            <div class="card-unit">保留最後成功結果（包含檢查碼），不代表卡片仍在感應區；重啟後清空。</div>
+        <div class="cards event-cards">
+            <div class="card">
+                <div class="card-title">📇 RFID 最近5次讀卡</div>
+                <div class="card-value" id="rfidHistory">尚未讀卡</div>
+                <p>讀卡任務：<span id="rfidStatus">等待資料</span></p>
+                <p id="rfidError"></p>
+                <div class="card-unit">顯示最近 5 次卡號與讀卡時間；重啟後清空。</div>
+            </div>
+
+            <div class="card" aria-live="polite">
+                <div class="card-title">🚶 移動偵測與音樂</div>
+                <div class="card-value" id="motionMessage">等待資料</div>
+                <p id="motionHistory">最近 5 次：尚未偵測</p>
+                <p>偵測次數：<span id="motionCount">0</span></p>
+                <p>喇叭：<span id="musicStatus">等待資料</span></p>
+                <p id="motionError"></p>
+                <div class="card-unit">提示至少保留 5 秒；音樂由 ESP32 喇叭播放，狀態不代表實際有聲。紀錄重啟後清空。</div>
+            </div>
         </div>
 
-        <div class="card" style="margin-bottom: 30px;" aria-live="polite">
-            <div class="card-title">🚶 移動偵測與音樂</div>
-            <div class="card-value" id="motionMessage">等待資料</div>
-            <p>最後偵測：<span id="motionTime">--</span></p>
-            <p>偵測次數：<span id="motionCount">0</span></p>
-            <p>喇叭：<span id="musicStatus">等待資料</span></p>
-            <p id="motionError"></p>
-            <div class="card-unit">提示至少保留 5 秒；音樂由 ESP32 喇叭播放，狀態不代表實際有聲。紀錄重啟後清空。</div>
+        <div class="led-status">
+            <div class="status-title">💡 LED 狀態</div>
+            <p id="ledAlertStatus" role="status" aria-live="polite">LED 狀態載入中</p>
+            <p id="ledCommandStatus" role="status" aria-live="polite"></p>
+            <p id="ledFlashCount">閃紅次數：--</p>
+            <p>閃紅序號：時間</p>
+            <p id="ledFlashHistory">尚無閃紅紀錄</p>
         </div>
 
         <div class="buttons">
             <button id="ledButton" class="btn-primary" onclick="toggleLED()" disabled>按鈕 1: 切換 LED</button>
             <button class="btn-primary" onclick="publishData()">按鈕 2: 發布數據</button>
         </div>
-        
-        <p id="ledAlertStatus" role="status" aria-live="polite">LED 狀態載入中</p>
 
         <footer>
-            <p>📡 實時數據刷新 | 🔄 每1秒更新一次</p>
+            <p>📡 感測資料約每秒更新 | LED 狀態獨立快速更新</p>
             <p>IoT Web Server System v1.2 - 由 Microdot 提供支持</p>
         </footer>
     </div>
     
+    <script src="/assets/uplot/1.6.32/uPlot.iife.min.js"></script>
     <script>
+        let ledRequestPending = false;
+        let ledStatusRequest = null;
+        let sensorUpdatePending = false;
+        let motionUpdatePending = false;
+        const LED_POLL_MS = 200;
+        const LED_STATUS_TIMEOUT_MS = 1000;
+        const SENSOR_POLL_MS = 1000;
+        const MOTION_POLL_MS = 1000;
+        const STATUS_VALID_MS = 5000;
+        const LIGHT_HISTORY_LIMIT = 80;
+        const LIGHT_DEFAULT_MAX = 2048;
+        const LIGHT_ADC_MAX = 4095;
+        const LIGHT_CHART_HEIGHT = 280;
+        const LIGHT_THRESHOLD_COLOR = '#dc2626';
+        let lightThresholds = null;
+
+        function updateLightThresholds(rawThresholds) {
+            const trigger = Number(rawThresholds?.trigger);
+            const reset = Number(rawThresholds?.reset);
+            if (Number.isFinite(trigger) && Number.isFinite(reset)) {
+                lightThresholds = {trigger, reset};
+            }
+        }
+
+        function drawLightThresholds(chart) {
+            if (!lightThresholds) return;
+            const ctx = chart.ctx;
+            const left = chart.bbox.left;
+            const right = left + chart.bbox.width;
+            const thresholds = [
+                {value: lightThresholds.trigger, label: '暗 ' + lightThresholds.trigger, labelOffset: 10},
+                {value: lightThresholds.reset, label: '亮 ' + lightThresholds.reset, labelOffset: -10}
+            ];
+            ctx.save();
+            ctx.strokeStyle = LIGHT_THRESHOLD_COLOR;
+            ctx.fillStyle = LIGHT_THRESHOLD_COLOR;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            thresholds.forEach(({value, label, labelOffset}) => {
+                const y = chart.valToPos(value, 'y', true);
+                if (y < chart.bbox.top || y > chart.bbox.top + chart.bbox.height) return;
+                ctx.beginPath();
+                ctx.moveTo(left, y);
+                ctx.lineTo(right, y);
+                ctx.stroke();
+                ctx.fillText(label, right - 6, y + labelOffset);
+            });
+            ctx.restore();
+        }
+
+
+        const lightHistory = [];
+        let lightChart = null;
+        let lastLedSnapshot = null;
+        let lastLedSuccessAt = null;
+        let lastConnectionSuccessAt = null;
+        let ledFailureCount = 0;
+        let lastLedFailure = null;
+        const statusNow = () => performance.now();
+
+        function getLightChartMax() {
+            return lightHistory.some(value => value > LIGHT_DEFAULT_MAX)
+                ? LIGHT_ADC_MAX
+                : LIGHT_DEFAULT_MAX;
+        }
+
+        function getLightAxisSplits() {
+            return getLightChartMax() === LIGHT_DEFAULT_MAX
+                ? [0, 512, 1024, 1536, 2048]
+                : [0, 1024, 2048, 3072, 4095];
+        }
+
+        function getLightChartData() {
+            return [
+                lightHistory.map((_, index) => index),
+                [...lightHistory]
+            ];
+        }
+
+        function createLightChart() {
+            const container = document.getElementById('lightChart');
+            if (!container || typeof uPlot !== 'function') return false;
+            if (lightChart) return true;
+            const width = Math.max(container.clientWidth, 320);
+            const options = {
+                width,
+                height: LIGHT_CHART_HEIGHT,
+                padding: [12, 12, 12, 12],
+                scales: {
+                    x: {time: false, auto: false, range: (_u, min, max) => [min, max]},
+                    y: {auto: false, range: [0, getLightChartMax()]}
+                },
+                axes: [
+                    {show: false},
+                    {
+                        scale: 'y',
+                        label: '光照 ADC',
+                        size: 58,
+                        splits: () => getLightAxisSplits(),
+                        values: (self, splits) => splits.map(value => String(value)),
+                        grid: {stroke: '#cbd5e1', width: 1, dash: [6, 5]},
+                        ticks: {stroke: '#94a3b8', width: 1}
+                    }
+                ],
+                series: [
+                    {},
+                    {label: '光照', stroke: '#667eea', width: 3, points: {show: false}}
+                ],
+                legend: {show: false},
+                cursor: {show: false},
+                hooks: {draw: [drawLightThresholds]}
+            };
+            lightChart = new uPlot(options, getLightChartData(), container);
+            return true;
+        }
+
+        function resizeLightChart() {
+            const container = document.getElementById('lightChart');
+            if (!lightChart || !container) return;
+            lightChart.setSize({
+                width: Math.max(container.clientWidth, 320),
+                height: LIGHT_CHART_HEIGHT
+            });
+        }
+
+        function renderLightChart() {
+            const empty = document.getElementById('lightChartEmpty');
+            if (!empty || !lightHistory.length) {
+                if (empty) empty.style.display = 'grid';
+                return;
+            }
+            if (!createLightChart()) {
+                empty.textContent = '圖表元件載入失敗';
+                empty.style.display = 'grid';
+                return;
+            }
+            const chartData = getLightChartData();
+            lightChart.setData(chartData, false);
+            lightChart.setScale('x', {min: 0, max: Math.max(1, chartData[0].length - 1)});
+            lightChart.setScale('y', {min: 0, max: getLightChartMax()});
+            empty.style.display = 'none';
+        }
+
+        function updateLightChart(value) {
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) {
+                renderLightChart();
+                return;
+            }
+            lightHistory.push(Math.max(0, Math.min(LIGHT_ADC_MAX, numeric)));
+            if (lightHistory.length > LIGHT_HISTORY_LIMIT) lightHistory.shift();
+            renderLightChart();
+        }
+
+        function getLightChartDiagnostics() {
+            return {
+                ready: Boolean(lightChart),
+                sampleCount: lightHistory.length,
+                scaleMax: getLightChartMax(),
+                xMax: lightChart?.scales?.x?.max ?? null,
+                thresholds: lightThresholds ? {...lightThresholds} : null
+            };
+        }
+
+        if (typeof window !== 'undefined') window.addEventListener('resize', resizeLightChart);
+
+        function connectionSucceeded() {
+            lastConnectionSuccessAt = statusNow();
+        }
+
+        function renderLedFlashHistory(led) {
+            const countElement = document.getElementById('ledFlashCount');
+            const historyElement = document.getElementById('ledFlashHistory');
+            const count = led && Number.isFinite(Number(led.alert_flash_count))
+                ? Number(led.alert_flash_count)
+                : null;
+            const log = Array.isArray(led?.alert_flash_log)
+                ? led.alert_flash_log.slice(-5)
+                : [];
+            if (countElement) {
+                countElement.textContent = count === null
+                    ? '閃紅次數：--'
+                    : '閃紅次數：' + count;
+            }
+            if (historyElement) {
+                historyElement.textContent = log.length
+                    ? log.map(item => '閃紅' + item.sequence + '：' + item.time).join('\n')
+                    : '尚無閃紅紀錄';
+            }
+        }
+
+        function renderLedStatus() {
+            const now = statusNow();
+            const fresh = lastLedSuccessAt !== null && now - lastLedSuccessAt < STATUS_VALID_MS;
+            const connected = lastConnectionSuccessAt !== null && now - lastConnectionSuccessAt < STATUS_VALID_MS;
+            const led = lastLedSnapshot;
+            renderLedFlashHistory(led);
+            const alertTotal = Number.isFinite(Number(led?.alert_flash_total))
+                ? Number(led.alert_flash_total) : 5;
+            document.getElementById('ledButton').disabled = ledRequestPending || !fresh || !led?.available || Boolean(led?.alert_active);
+            document.getElementById('ledAlertStatus').textContent = !fresh
+                ? (connected ? 'LED 狀態更新異常，暫停操作' : '連線狀態無法確認，暫停操作')
+                : (led.alert_active ? '紅燈警示中：閃爍 ' + alertTotal + ' 次，改色操作暫停且不排隊'
+                    : (led.available ? 'LED 可操作' : 'LED 尚未就緒'));
+        }
+
+        function monitorLedFreshness() {
+            renderLedStatus();
+            setTimeout(monitorLedFreshness, 200);
+        }
+
+        function getLedDiagnostics() {
+            const now = statusNow();
+            return {failureCount: ledFailureCount, lastFailure: lastLedFailure,
+                ledAgeMs: lastLedSuccessAt === null ? null : now - lastLedSuccessAt,
+                connectionAgeMs: lastConnectionSuccessAt === null ? null : now - lastConnectionSuccessAt};
+        }
+
+        function updateLedStatus() {
+            if (ledStatusRequest) return ledStatusRequest;
+            const request = (async () => {
+                const controller = new AbortController();
+                let timer;
+                try {
+                    const deadline = new Promise((_, reject) => {
+                        timer = setTimeout(() => {
+                            controller.abort();
+                            reject(new Error('LED status timeout'));
+                        }, LED_STATUS_TIMEOUT_MS);
+                    });
+                    const snapshot = await Promise.race([
+                        fetch('/api/led/status', {cache: 'no-store', signal: controller.signal})
+                            .then(response => {
+                                if (!response.ok) throw new Error('HTTP ' + response.status);
+                                return response.json();
+                            }),
+                        deadline
+                    ]);
+                    connectionSucceeded();
+                    ledFailureCount = 0;
+                    showLedStatus(snapshot);
+                } catch (error) {
+                    ledFailureCount++;
+                    lastLedFailure = {reason: error.message, at: statusNow()};
+                    renderLedStatus();
+                } finally {
+                    clearTimeout(timer);
+                }
+            })();
+            ledStatusRequest = request;
+            request.finally(() => {
+                if (ledStatusRequest === request) ledStatusRequest = null;
+            });
+            return request;
+        }
+
+        async function pollLedStatus() {
+            await updateLedStatus();
+            setTimeout(pollLedStatus, LED_POLL_MS);
+        }
+
+        async function pollSensorData() {
+            await updateData();
+            setTimeout(pollSensorData, SENSOR_POLL_MS);
+        }
+
+        async function updateMotionStatus() {
+            if (motionUpdatePending) return;
+            motionUpdatePending = true;
+            try {
+                const response = await fetch('/api/motion/status', {cache: 'no-store'});
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                renderMotionStatus(await response.json());
+            } catch (error) {
+                console.error('移動狀態更新失敗:', error);
+            } finally {
+                motionUpdatePending = false;
+            }
+        }
+
+        async function pollMotionStatus() {
+            await updateMotionStatus();
+            setTimeout(pollMotionStatus, MOTION_POLL_MS);
+        }
         function showLedStatus(led) {
-            document.getElementById('ledButton').disabled = !led.available || Boolean(led.alert_active);
-            document.getElementById('ledAlertStatus').textContent = led.alert_active
-                ? '紅燈警示中：閃爍 5 次，改色操作暫停且不排隊'
-                : (led.available ? 'LED 可操作' : 'LED 尚未就緒');
+            lastLedSnapshot = {...led};
+            lastLedSuccessAt = statusNow();
+            renderLedStatus();
         }
         // 自動刷新數據
+        function renderRfidHistory(rfid) {
+            const historyElement = document.getElementById('rfidHistory');
+            const recentReads = Array.isArray(rfid?.recent_reads)
+                ? rfid.recent_reads.slice(-5)
+                : [];
+            historyElement.textContent = recentReads.length
+                ? recentReads.map(read => read.uid + '：' + read.read_at).join('\n')
+                : '尚未讀卡';
+        }
+        function renderMotionHistory(motion) {
+            const historyElement = document.getElementById('motionHistory');
+            const detections = Array.isArray(motion?.recent_detections)
+                ? motion.recent_detections.slice(-5)
+                : [];
+            historyElement.textContent = detections.length
+                ? detections.map((time, index) => '移動' + (index + 1) + '：' + time).join('\n')
+                : '最近 5 次：尚未偵測';
+        }
+
+        function renderMotionStatus(motion) {
+            const sensorReady = motion.sensor_status === 'ready';
+            document.getElementById('motionMessage').textContent = sensorReady
+                ? (motion.detected ? '偵測到移動物' : '等待移動')
+                : (motion.sensor_status === 'error' ? 'PIR 讀取異常' : 'PIR 尚未就緒');
+            document.getElementById('motionMessage').style.color =
+                sensorReady && motion.detected ? '#b42318' : '#333';
+            renderMotionHistory(motion);
+            document.getElementById('motionCount').textContent = motion.count ?? 0;
+            const musicLabels = {starting: '初始化中', idle: '等待移動', playing: '播放中',
+                completed: '播放完成', error: '播放失敗', unavailable: '未初始化', stopped: '已停止'};
+            document.getElementById('musicStatus').textContent = musicLabels[motion.music_status] || '未知';
+            document.getElementById('motionError').textContent =
+                [motion.sensor_error, motion.music_error].filter(Boolean).join('；');
+        }
+
+
         async function updateData() {
+            if (sensorUpdatePending) return;
+            sensorUpdatePending = true;
             try {
-                const response = await fetch('/api/data');
+                const response = await fetch('/api/data', {cache: 'no-store'});
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const data = await response.json();
-                showLedStatus(data.led || {});
+                updateLightThresholds(data.light_thresholds);
+                renderLedStatus();
+                // LED state has its own fast channel; never apply this older copy.
                 
                 // 更新溫度
                 const temp = data.temp ?? '--';
@@ -284,9 +682,10 @@
                 document.getElementById('humidity').textContent = humidity;
                 document.getElementById('humidityCard').textContent = humidity;
                 
-                // 更新光照
+                // 更新光照與折線圖
                 const light = data.light ?? '--';
                 document.getElementById('lightCard').textContent = light;
+                updateLightChart(light);
 
                 const rfid = data.rfid || {};
                 const rfidLabels = {
@@ -295,22 +694,10 @@
                     init_error: '初始化失敗',
                     read_error: '讀卡異常，持續重試'
                 };
-                document.getElementById('rfidUid').textContent = rfid.last_uid ?? '尚未讀卡';
-                document.getElementById('rfidReadAt').textContent = rfid.last_read_at ?? '--';
+                renderRfidHistory(rfid);
                 document.getElementById('rfidStatus').textContent = rfidLabels[rfid.status] || '未知';
                 document.getElementById('rfidError').textContent = rfid.error ?? '';
-                const motion = data.motion || {};
-                const sensorReady = motion.sensor_status === 'ready';
-                document.getElementById('motionMessage').textContent = sensorReady
-                    ? (motion.detected ? '偵測到移動物' : '等待移動')
-                    : (motion.sensor_status === 'error' ? 'PIR 讀取異常' : 'PIR 尚未就緒');
-                document.getElementById('motionMessage').style.color = sensorReady && motion.detected ? '#b42318' : '#333';
-                document.getElementById('motionTime').textContent = motion.last_detected_at ?? '--';
-                document.getElementById('motionCount').textContent = motion.count ?? 0;
-                const musicLabels = {starting: '初始化中', idle: '等待移動', playing: '播放中',
-                    completed: '播放完成', error: '播放失敗', unavailable: '未初始化', stopped: '已停止'};
-                document.getElementById('musicStatus').textContent = musicLabels[motion.music_status] || '未知';
-                document.getElementById('motionError').textContent = [motion.sensor_error, motion.music_error].filter(Boolean).join('；');
+                renderMotionStatus(data.motion || {});
                 document.getElementById('status').textContent = '🟢 正常';
                 
             } catch (error) {
@@ -319,28 +706,49 @@
                 document.getElementById('rfidStatus').textContent = '連接失敗，顯示上次資料';
                 document.getElementById('motionMessage').textContent = '連接失敗，顯示上次資料';
                 document.getElementById('musicStatus').textContent = '連接失敗，狀態未知';
-                document.getElementById('ledButton').disabled = true;
-                document.getElementById('ledAlertStatus').textContent = '連接失敗，LED 狀態未知';
+            } finally {
+                sensorUpdatePending = false;
             }
         }
         
         // 切換 LED
         async function toggleLED() {
             if (document.getElementById('ledButton').disabled) return;
+            ledRequestPending = true;
             document.getElementById('ledButton').disabled = true;
             try {
                 const response = await fetch('/api/led/toggle', { method: 'POST' });
-                if (response.ok) {
-                    console.log('LED 已切換');
-                    await updateData();
-                } else if (response.status === 409) {
-                    showLedStatus({available: true, alert_active: true});
-                } else {
-                    document.getElementById('ledAlertStatus').textContent = 'LED 操作失敗，HTTP ' + response.status;
+                const receipt = await response.json();
+                if (response.status !== 202) {
+                    document.getElementById('ledCommandStatus').textContent = '操作未受理：' + (receipt.reason || response.status);
+                    if (response.status === 409) showLedStatus({available: true, alert_active: true});
+                    return;
                 }
+                document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 已受理，等待執行';
+                for (let attempt = 0; attempt < 15; attempt++) {
+                    const check = await fetch('/api/led/commands/' + receipt.id);
+                    if (!check.ok) {
+                        document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 結果未知或紀錄已過期';
+                        return;
+                    }
+                    const result = await check.json();
+                    if (result.status === 'executed') {
+                        document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 已執行';
+                        return;
+                    }
+                    if (['rejected', 'failed', 'cancelled'].includes(result.status)) {
+                        document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 未完成：' + result.status + ' / ' + result.reason;
+                        return;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                }
+                document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 尚未取得完成結果，請查詢命令狀態';
             } catch (error) {
                 console.error('LED 控制失敗:', error);
-                document.getElementById('ledAlertStatus').textContent = 'LED 操作失敗，請檢查連接';
+                document.getElementById('ledCommandStatus').textContent = '連接中斷，LED 操作結果未知';
+            } finally {
+                ledRequestPending = false;
+                await updateLedStatus();
             }
         }
         
@@ -348,9 +756,17 @@
         async function publishData() {
             try {
                 const response = await fetch('/api/publish', { method: 'POST' });
-                if (response.ok) {
+                const result = await response.json().catch(() => ({}));
+                if (result.status === 'accepted') {
+                    console.log('數據已受理，等待 MQTT 發布結果');
+                    alert('✅ 溫濕度數據發布請求已受理');
+                } else if (result.status === 'published') {
                     console.log('數據已發布到 MQTT');
                     alert('✅ 溫濕度數據已發布到 MQTT');
+                } else {
+                    const message = result.error || 'MQTT 狀態未知';
+                    console.error('發布未完成:', message);
+                    alert(`❌ 發布未完成：${message}`);
                 }
             } catch (error) {
                 console.error('發布失敗:', error);
@@ -358,9 +774,11 @@
             }
         }
         
-        // 頁面加載時立即更新一次，然後每1秒更新
-        updateData();
-        setInterval(updateData, 1000);
+        // Each channel schedules its next request only after the previous one ends.
+        monitorLedFreshness();
+        pollSensorData();
+        pollMotionStatus();
+        pollLedStatus();
     </script>
 </body>
 </html>
