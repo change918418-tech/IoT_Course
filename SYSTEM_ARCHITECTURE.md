@@ -342,6 +342,81 @@ MFRC522 SPI
 
 `MqttManager.subscribe()` 保存並派送 callback；`handle_cmd()` 維持既有 wire format，解析後只呼叫 `CommandService.submit()`，不直接操作 LED。這完成 P1 的共同入口，但尚未包含重連後重新訂閱政策。
 
+### 8.1 MQTT 同步 callback 的契約與責任邊界
+
+目前使用的 `lib/mqtt_as.py` 以 `subs_cb(topic, msg, retained)` 的**同步呼叫契約**交付入站訊息。它不會等待應用層的 `async def` callback；若直接把非同步函式交給它，呼叫結果只是尚未執行的 coroutine。`MqttManager.on_message()` 因此必須保持普通 `def`，先取得已保存的應用 handler，再依 handler 的結果決定直接完成或以 `uasyncio.create_task()` 排程。
+
+本專案的同步 callback 只負責快速邊界工作：
+
+1. 接收並記錄 `topic`、`msg`、`retained`。
+2. 將 bytes 解碼、解析既有 `led:4`／`led=4` 格式。
+3. 呼叫 `CommandService.submit('set_color', 'mqtt', value)`。
+
+它不等待 Broker、不讀 DHT、不執行 LED 閃爍，也不直接寫 GPIO。`subscribe()` 另須保存傳入的應用 callback，因為底層 client 實際註冊的是 `MqttManager.on_message`；只完成 topic 訂閱而忘記保存 handler，訊息仍會在函式庫內被收到，但不會進入應用命令路徑。
+
+| 階段 | 負責者 | 可宣稱的結果 |
+|---|---|---|
+| 底層同步 callback 被呼叫 | `mqtt_as` → `MqttManager.on_message` | 裝置收到一筆入站訊息 |
+| payload 解析並提交 | `tasks.handle_cmd` → `CommandService` | 命令已受理或已拒絕 |
+| LED 執行 | `LedController.run()` | 命令已套用／失敗 |
+
+`wait_connected()` 只確認連線條件，不代表重連後訂閱已恢復；目前重新訂閱政策仍是待補強項目。這個界線適合作為測試題：fake MQTT 必須同步呼叫保存的 `subs_cb`，再驗證 `led:4` 確實抵達 `CommandService`，而不是只檢查 `subscribe()` 回傳成功。
+
+### 8.2 從 MQTT 封包到 LED 的實際時序
+
+以下用外部 client 發送 `led:4` 說明目前程式的責任分界。這不是一次同步函式呼叫就完成的動作，而是跨越函式庫、adapter、應用任務與 LED owner 的多階段流程：
+
+1. **Broker／網路交付：**外部 client 將 payload 發到命令 topic；`mqtt_as` 收到封包後準備呼叫設定中的 `subs_cb`。此時只能知道裝置函式庫收到資料，不能知道 LED 會不會變紅。
+2. **底層 callback：**`mqtt_as` 以同步方式呼叫 `MqttManager.on_message(topic, msg, retained)`。這個入口是普通 `def`，因為底層不會 `await` 應用 callback。
+3. **adapter 派送：**`MqttManager.on_message()` 查找 `subscribe()` 時保存的 `_message_callback`，再把三個原始參數交給它。若保存動作遺漏，封包會停在 adapter，不會進入 `tasks.py`。
+4. **wire format 解析：**`tasks.mqtt_subscribe_task()` 註冊的 `handle_cmd()` 將 bytes 解碼，接受既有的 `led:4`／`led=4` 格式，並轉成內部 `set_color` 命令。
+5. **命令受理：**`CommandService.submit()` 檢查色碼、來源、模式、busy、停止狀態與 queue 容量，回傳 receipt。這個 receipt 表示命令已受理或被拒絕，不表示 GPIO 已經寫入。
+6. **owner 執行：**`LedController.run()` 在自己的 task 中取出命令，依目前模式與效果狀態更新 LED；只有這一層在初始化後寫 RGB GPIO。
+
+因此，觀察到以下各種訊息時，診斷結論不同：
+
+| 觀察結果 | 可以推論 | 仍不能推論 |
+|---|---|---|
+| MQTT log 顯示收到 `led:4` | 函式庫或 adapter 看到了 payload | handler 已執行、命令合法、LED 已變色 |
+| `handle_cmd()` 顯示命令 receipt | payload 已解析，命令已受理或拒絕 | owner 已套用、LED 物理亮度正確 |
+| `LedController` 記錄 applied | 軟體 owner 已執行 GPIO 寫入 | 外部觀察者一定看到正確光學結果 |
+| `wait_connected()` 回傳 True | 當次等待取得連線確認 | 重連後訂閱已恢復、任何命令已完成 |
+
+這個時序也是為什麼 `MqttManager.on_message()` 不應直接呼叫 `RgbLed.write()`：那會跳過共同命令入口、繞過 queue／busy／AUTO／MANUAL 政策，並讓 MQTT 變成另一個偷偷擁有 LED 的來源。
+
+### 8.3 兩個容易混淆的失敗版本
+
+#### 失敗版本 A：把同步函式庫當成會等待的非同步函式庫
+
+```python
+# 看起來合理，但 mqtt_as 不會 await 它
+async def handle_cmd(topic, msg, retained):
+    command = parse(msg)
+    await something()
+    command_service.submit('set_color', 'mqtt', command)
+```
+
+底層執行 `handle_cmd(...)` 時只取得 coroutine。若沒有 adapter bridge，`parse()` 與 `submit()` 都不會發生。修正不是盲目刪除所有 `async`，而是讓 `MqttManager.on_message()` 成為符合底層契約的普通入口；本專案的短處理 handler 保持同步，真正需要等待的工作才排入事件迴圈。
+
+#### 失敗版本 B：訂閱成功，但 callback 被丟掉
+
+```text
+client 設定 subs_cb = MqttManager.on_message
+  → subscribe(topic, callback=handle_cmd)
+  → 只呼叫 client.subscribe(topic)
+  → 沒有保存 handle_cmd
+  → on_message 找不到應用 handler
+  → MQTT 有資料，但 CommandService 沒有命令
+```
+
+因此 `subscribe()` 回傳 `True` 只表示 topic 訂閱呼叫成功；還要用 fake client 同步觸發底層 callback，確認保存的 handler 收到 `(topic, msg, retained)`，再確認命令抵達 `CommandService`。
+
+### 8.4 目前實作與尚未完成的邊界
+
+目前已完成的是 callback bridge、handler 派送、`wait_connected()` 結果檢查、既有 payload 解析與共用 `CommandService` 入口。這些由桌面 fake MQTT／fake GPIO 測試覆蓋。
+
+目前尚未完成的是重連後重新訂閱、命令跨重連的去重／過期政策、Broker ACK 與真實硬體端到端確認。不能因為同步 callback 測試通過，就宣稱 MQTT 長時間運作或 LED 實機控制已完整驗收。
+
 ## 9. HTTP 與 MQTT 介面
 
 ### HTTP API

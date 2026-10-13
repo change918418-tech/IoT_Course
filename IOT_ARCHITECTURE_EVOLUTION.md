@@ -167,6 +167,174 @@ MQTT callback───────────────> application or GPIO
 
 **得到的優點：**MQTT adapter 修正不會複製一套 LED busy／queue／優先權規則；協定錯誤可以由 fake MQTT 測試先抓出。
 
+### 6.2.1 教學重點：同步 callback 不等於同步處理完成
+
+這一段要先把「誰呼叫誰」畫清楚，再談 `async`。學生最容易犯的錯，不是語法打錯，而是把函式名稱叫作 callback，就以為函式庫會按照應用程式的非同步規則等待它。
+
+#### 先回到原始事故：封包到了，為什麼 LED 沒反應？
+
+目前使用的 `lib/mqtt_as.py` 會在收到訂閱訊息後，以近似下列方式呼叫設定中的 `subs_cb`：
+
+```python
+# 這是函式庫對應用層的實際呼叫形狀
+callback(topic, msg, retained)
+```
+
+這是**同步呼叫介面**：函式庫在目前的呼叫脈絡直接呼叫 callback，呼叫表達式返回後才繼續自己的流程。它沒有寫 `await`，也沒有把 callback 放入 `uasyncio.create_task()`。
+
+原始應用層卻曾把收訊處理寫成非同步函式：
+
+```python
+async def handle_cmd(topic, msg, retained):
+    print('解析 MQTT 指令')
+    await something()
+    led.write(4)
+```
+
+當同步函式庫執行 `handle_cmd(topic, msg, retained)` 時，Python 不會立刻執行函式內的 `print()`、`await` 或 `led.write()`。因為 `async def` 被呼叫時，先得到的是一個 coroutine 物件：
+
+```text
+函式庫收到封包
+  → 呼叫 async def handle_cmd(...)
+  → 得到 coroutine 物件
+  → 函式庫沒有 await，也沒有 create_task
+  → handle_cmd 的函式本體沒有開始執行
+  → payload 沒有解析，LED 命令沒有提交
+```
+
+所以「函式庫確實呼叫了 callback」與「callback 內的程式確實執行」是兩件事。這也是為什麼只在 log 中看到收到 MQTT 封包，不能推出 LED 已經收到命令。coroutine 之後若被回收，還可能出現「coroutine was never awaited」類型的警告；但即使沒有看到警告，命令仍可能已經靜默遺失。
+
+#### `async def` 到底改變了什麼？
+
+`async def` 不是「讓普通函式自動變快」的裝飾，而是改變呼叫契約。呼叫者必須以 `await` 等待，或以 task API 排程：
+
+| 呼叫方式 | 呼叫當下得到什麼 | 函式本體何時執行 |
+|---|---|---|
+| `normal_handler(data)` | 普通返回值 | 立即在目前呼叫脈絡執行 |
+| `async_handler(data)` | coroutine 物件 | 尚未執行；等待或排程後才執行 |
+| `await async_handler(data)` | 非同步函式的返回值 | 由目前 task 等待它完成 |
+| `create_task(async_handler(data))` | task／排程結果 | 交給事件迴圈，稍後執行 |
+
+因此，修正問題不能只把 `def` 改成 `async def`，也不能只看函式名稱中有沒有 `await`。必須先確認**函式庫是用哪一種方式呼叫 callback**，再在 adapter 中把兩邊的契約接起來。
+
+#### 為什麼不直接修改 `mqtt_as`，讓它 `await` callback？
+
+這個想法看似直接，但會把應用政策塞進 vendored 函式庫，並且改變所有使用者的 callback 行為。P0 的目標是修正目前應用與函式庫之間的契約，不是另造一個 MQTT 函式庫版本。因此選擇把差異關在 `communication/mqtt_client.py`：
+
+1. `mqtt_as` 繼續收到封包就同步呼叫 `MqttManager.on_message`。
+2. `MqttManager.on_message` 使用函式庫真正要求的普通 `def` 介面。
+3. 只有當應用 handler 回傳 awaitable 時，bridge 才用 `uasyncio.create_task()` 排程。
+4. 函式庫不知道 `CommandService`、LED busy 或 GPIO 所有權；這些規則留在應用層。
+
+這個邊界讓未來替換 MQTT 函式庫時，只需重新驗證 adapter 契約，不必把 LED 仲裁、Web API 和按鈕任務一起重寫。
+
+#### 修正後的呼叫鏈
+
+本專案的修正版可以拆成六個明確步驟：
+
+```text
+1. mqtt_as 收到 MQTT PUBLISH 封包
+2. mqtt_as 同步呼叫 MqttManager.on_message(topic, msg, retained)
+3. on_message 取得 subscribe() 時保存的應用 handler
+4. handler 解碼並解析 led:4／led=4
+5. handler 呼叫 CommandService.submit('set_color', 'mqtt', 4)
+6. LedController.run() 從有界佇列取命令，最後才寫入 GPIO
+```
+
+adapter 的入口必須是普通 `def`，但它可以容納同步 handler 與非同步 handler：
+
+```python
+# mqtt_as 實際呼叫的入口
+def on_message(topic, msg, retained):
+    handler = self._message_callback
+    if handler is None:
+        return
+
+    try:
+        result = handler(topic, msg, retained)
+        if result is not None and hasattr(result, '__await__'):
+            uasyncio.create_task(result)
+    except Exception as error:
+        print('[MQTT] 收訊 callback 失敗:', error)
+```
+
+本專案目前的 `handle_cmd()` 刻意保持同步，因為它只做 bytes 解碼、格式解析與 `CommandService.submit()`。這個操作應快速返回 receipt，不需要在 callback 中等待網路、DHT 量測或 LED 閃爍。若未來需要較長的非同步工作，才由 bridge 排程 coroutine；該 coroutine 仍要自己處理例外、取消與完成狀態。`create_task()` 只代表「已排程」，不代表工作已完成。
+
+#### 第二個斷路點：為什麼還要保存 handler？
+
+`mqtt_as` 的設定保存的是：
+
+```text
+mqtt_config['subs_cb'] = MqttManager.on_message
+```
+
+這表示底層 client 收到訊息時，會呼叫 `MqttManager.on_message`。它不會自動知道 `mqtt_subscribe_task()` 在 `subscribe(topic, callback=handle_cmd)` 傳入的 `handle_cmd`。因此 adapter 必須在 `subscribe()` 中保存 callback：
+
+```text
+訂閱 topic
+  → client 只知道 MqttManager.on_message
+  → on_message 查找 _message_callback
+  → _message_callback 必須是 handle_cmd
+  → 否則訊息在 adapter 內停止，不會到達 CommandService
+```
+
+如果只把 topic 訂閱成功當成完成，測試會漏掉這個斷路。正確的測試要讓 fake client 直接同步呼叫它保存的 `subs_cb`，再檢查註冊的 handler 收到原始 `(topic, msg, retained)` 三個參數。
+
+#### callback 的工作範圍為什麼要小？
+
+同步 callback 可能在函式庫收訊處理的呼叫脈絡中執行。即使底層整體使用 `uasyncio`，也不能假定 callback 內任意長工作都安全。若 callback 直接做下列事情，會把 MQTT 收訊邊界和裝置控制政策混在一起：
+
+- 等待另一個網路回覆或 Broker ACK。
+- 重新量測 DHT 或 ADC。
+- 直接呼叫 `RgbLed.write()`。
+- 在 callback 中執行完整 LED 閃爍迴圈。
+- 複製一套 MQTT 專用的 busy、優先權與恢復規則。
+
+本專案因此把 callback 限制在快速的 decode、驗證、記錄與派送；`CommandService` 統一命令受理，`LedController` 作為唯一 LED owner 執行效果。這不是因為 callback 永遠不能做非同步工作，而是因為長工作與硬體所有權必須有可觀察、可測試的邊界。
+
+#### 收到、受理、執行：三個時間點不能混成一句「成功」
+
+以外部 client 發送 `led:4` 為例，完整路徑至少包含下列階段：
+
+| 階段 | 發生的事情 | 目前能證明什麼 | 不能證明什麼 |
+|---|---|---|---|
+| 1. Broker 轉交 | client 的 PUBLISH 到達裝置函式庫 | 函式庫收到一筆訊息 | callback 已執行、LED 已變紅 |
+| 2. callback 被呼叫 | `on_message()` 取得 topic、payload、retained | adapter 收到資料 | payload 合法、命令已受理 |
+| 3. payload 解析 | `handle_cmd()` 將 `led:4` 轉成色碼 4 | wire format 可被應用理解 | owner 已取出命令 |
+| 4. 命令受理 | `CommandService.submit()` 回傳 receipt | 命令通過輸入、busy、queue 等規則 | GPIO 已寫入、物理 LED 一定發光 |
+| 5. owner 執行 | `LedController.run()` 取出命令並寫入 RGB GPIO | 軟體宣稱 applied 或 failed | 外部觀察者一定看見正確亮度 |
+
+所以「callback 被呼叫」不是「LED 已套用」；`accepted` 不是 `applied`；QoS 0 的 publish 返回也不是所有訂閱者已處理。教材、API 與 log 都應保留這些不同證據，否則故障發生時無法知道是網路、adapter、命令政策還是硬體路徑出了問題。
+
+#### `wait_connected()` 又是另一件事
+
+`wait_connected()` 解決的是「目前是否等到連線確認」；它不會自動解決：
+
+1. 初次連線後是否真的完成 topic 訂閱。
+2. 斷線重連後是否再次訂閱。
+3. 舊命令是否仍在 queue、是否應丟棄或去重。
+4. Broker 在線是否代表 LED 命令已套用。
+
+目前程式先在 MQTT 訂閱任務中等待確認，再執行訂閱；重連後重新訂閱仍是待補強的 P2 議題。學生不應用「`wait_connected()` 回傳 True」推論整條遠端控制鏈已恢復。
+
+#### 用測試把契約變成可觀察證據
+
+目前 `tests/test_mqtt.py` 的測試分別驗證兩個不同邊界：
+
+- `test_synchronous_callback_dispatches_registered_handler`：fake client 同步呼叫保存的底層 callback，確認 handler 收到 `(b'cmd', b'led:4', False)`，並確認 `MqttManager.on_message` 不是 coroutine function。
+- `test_mqtt_command_reaches_command_service`：fake MQTT 訂閱 callback 後，直接送入 `led:4`，確認 `CommandService` 收到 `('set_color', 'mqtt', 4)`。
+
+第一個測試回答「函式庫契約有沒有接通」；第二個測試回答「應用命令路徑有沒有接通」。兩個都通過，仍只代表桌面 fake 路徑成立，不代表真 Broker、ESP32 排程、GPIO 電氣輸出或重連恢復已驗證。
+
+學生閱讀這個案例時，應先回答四個問題，再決定要不要改成 `async def`：
+
+1. 真正呼叫 callback 的元件是誰？
+2. 它會 `await`、建立 task，還是只把返回值丟掉？
+3. callback 返回時，系統能宣稱收到、受理，還是已完成？
+4. 下一層誰擁有 queue、狀態與 GPIO？
+
+這個案例的核心不是「同步比較好」或「非同步比較好」，而是**每一個邊界都要使用呼叫者和被呼叫者共同遵守的契約**。`communication/mqtt_client.py` 吸收外部函式庫的同步／非同步差異，`tasks.py` 負責 MQTT wire format 與命令轉換，`CommandService`／`LedController` 負責控制政策；分層的價值就在於每一層可以回答自己知道、也只應該知道的問題。
+
 ### 6.3 技術點八：accepted、published、applied 不同
 
 - **是什麼：**把命令或發佈生命週期拆成不同可觀察階段：收到／受理、正在處理、已套用、已發布、失敗或不可用。

@@ -15,6 +15,27 @@
 `BUG` 表示行為不符合既有預期；`需求變更` 包含新功能、政策調整、文件與流程要求。一件工作若同時包含兩類，拆分紀錄或明確標示各項原因。
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
+
+## CHG-20261013-029｜擴充 MQTT 同步 callback 詳細教材
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-10-13 10:47:20 +08:00，工具取得台北時間。
+- **原因：**前一版已補上同步 callback 的結論與責任邊界，但說明過於濃縮，未充分交代原始錯誤如何形成、`async def` 呼叫後為何只得到 coroutine、handler 為何會在 adapter 斷路、命令受理與 LED 套用為何不是同一時間點；學生缺少完整的因果鏈就難以自行診斷類似問題。
+- **作法：**擴充 `IOT_ARCHITECTURE_EVOLUTION.md` 的 S2 段落，加入原始事故、同步／非同步呼叫對照、錯誤與修正路徑、handler 保存原因、callback 工作範圍、完成階段、`wait_connected()` 邊界、測試證據與學生檢查問題；擴充 `SYSTEM_ARCHITECTURE.md`，以 `led:4` 逐步追蹤 Broker、`mqtt_as`、adapter、`tasks.py`、`CommandService` 與 `LedController`；擴充 `IOT_ARCHITECTURE_TECH_TREE.md` E02，改以契約推導 adapter 並連結物聯網的網路／時間／資源／硬體驗證差異。未修改程式、設定、API 或部署清單。
+- **影響：**教材現在同時說明「發生了什麼」、「為什麼會發生」、「修正放在哪一層」及「測試能證明什麼」，不再只給同步 callback 的規則結論。
+- **驗證：**以 Mermaid 11.13.0 實際解析三份修改文件的全部 Mermaid 區塊：`IOT_ARCHITECTURE_EVOLUTION.md` 4/4、`SYSTEM_ARCHITECTURE.md` 1/1、`IOT_ARCHITECTURE_TECH_TREE.md` 1/1，共 6/6 通過；`python -B -m unittest tests.test_mqtt -v` 通過 10/10，`python -B -m unittest discover -s tests -v` 通過 33/33，`git diff --check` 通過。未進行 ESP32 實機、真 Broker 或外部訂閱者端到端驗證。
+- **部署／回復：**只需同步三份 Markdown 文件與 `ChangeLog.md`，不需上傳 ESP32。回復時移除本紀錄及本回合新增段落；不得覆蓋私人 `config.py`。
+
+## CHG-20261013-028｜補充 MQTT 同步 callback 教材說明
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-10-13 10:26:00 +08:00，工具取得台北時間。
+- **原因：**既有文件已記錄 `mqtt_as` 的同步 callback 修正，但尚未完整說明同步呼叫契約、`async def` 未被 `await` 時只產生 coroutine、adapter 保存 handler、callback 與命令完成語意的差異；學生容易把「收到 callback」誤認為「命令已執行」。
+- **作法：**在 `IOT_ARCHITECTURE_EVOLUTION.md` 的 S2 P0 演進段落新增同步 callback 的契約、錯誤示例、bridge 邊界、handler 保存、快速派送與 fake MQTT 驗證方式；在 `SYSTEM_ARCHITECTURE.md` 新增目前實作的 callback 責任表與 `wait_connected()`／重連重新訂閱界線；在 `IOT_ARCHITECTURE_TECH_TREE.md` 的 E02 MQTT 節點加入第一性原理與測試教學交叉連結。未修改程式、設定、API 或部署清單。
+- **影響：**MQTT 教材可區分底層同步 callback、非同步 task 排程、命令受理與 LED 套用；讀者也能理解訂閱 callback 保存與重連恢復是兩個不同問題。
+- **驗證：**以 Mermaid 11.13.0 實際解析三份修改文件的全部 Mermaid 區塊：`IOT_ARCHITECTURE_EVOLUTION.md` 4/4、`SYSTEM_ARCHITECTURE.md` 1/1、`IOT_ARCHITECTURE_TECH_TREE.md` 1/1，共 6/6 通過；`python -B -m unittest tests.test_mqtt -v` 通過 10/10，`python -B -m unittest discover -s tests -v` 通過 33/33，`git diff --check` 通過。未進行 ESP32 實機、真 Broker 或外部訂閱者端到端驗證。
+- **部署／回復：**只需同步三份 Markdown 文件與 `ChangeLog.md`，不需上傳 ESP32。回復時移除本紀錄及三份文件新增段落；不得覆蓋私人 `config.py`。
+
 ## CHG-20261012-027｜新增物聯網軟體架構演進教學文件
 
 - **類別：**需求變更（教學文件）。

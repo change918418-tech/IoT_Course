@@ -272,6 +272,113 @@
 - **做什麼：**分開 telemetry、command、ack、status，避免不同學生互相控制。
 - **怎麼做：**例如 `course/{group}/{device}/telemetry`、`.../cmd`、`.../ack`、`.../status`；穩定且唯一 client ID；同步 MQTT 回呼快速解析／入隊，由工作 task 處理，再用契約測試確認與目前 vendored 函式庫相容。
 
+#### E02 的教學案例：從 callback 契約推導 adapter
+
+學生不要先背「MQTT callback 要用 `def`」這個結論，應先問：「哪個元件呼叫它？呼叫者會不會等待返回值？」本專案的答案來自 vendored `mqtt_as` 的實作：它收到訂閱訊息後，直接以 `subs_cb(topic, msg, retained)` 呼叫 callback。這個函式庫契約是同步呼叫，與應用程式其他地方使用 `uasyncio` 並不衝突，但兩者不能假設彼此會自動轉換。
+
+#### 1. 先拆開「呼叫」和「執行」
+
+當呼叫者是普通同步程式時：
+
+```python
+def library_delivers(callback, data):
+    result = callback(data)
+    return result
+```
+
+若 `callback` 是普通 `def`，函式本體會在這次呼叫中執行；若 `callback` 是 `async def`，這次只會建立 coroutine：
+
+```python
+async def callback(data):
+    print('這行尚未執行')
+
+result = callback(data)  # result 是 coroutine，不是已完成的工作
+```
+
+除非呼叫者接著 `await result` 或把它交給 `create_task()`，否則 callback 內的解析、命令提交與錯誤處理都沒有發生。這解釋了「網路封包確實抵達，但應用沒有反應」的表面矛盾：抵達的是函式庫，不一定是應用函式本體。
+
+#### 2. 再畫出本專案的兩條路徑
+
+錯誤路徑是：
+
+```text
+mqtt_as 收到封包
+  → 直接呼叫 async handler
+  → 得到 coroutine
+  → 沒有 await／create_task
+  → coroutine 沒有執行
+  → 命令沒有進入應用
+```
+
+修正路徑是：
+
+```text
+mqtt_as
+  → 同步呼叫 MqttManager.on_message
+  → adapter 找到 subscribe() 保存的 handler
+  → handler 解碼與解析 led:4／led=4
+  → CommandService.submit()
+  → LedController.run()
+  → RGB GPIO
+```
+
+這條路徑同時回答三個架構問題：
+
+- **契約在哪裡吸收？**在 `communication/mqtt_client.py`，由 bridge 吸收外部 callback 的同步／非同步差異。
+- **協定格式在哪裡處理？**在 `tasks.py`，把 MQTT wire format 轉成內部命令，不讓 LED controller 知道 topic 字串。
+- **控制政策在哪裡決定？**在 `CommandService`／`LedController`，統一驗證、busy、queue、AUTO／MANUAL 與 GPIO 所有權。
+
+#### 3. 為什麼 `subscribe()` 還必須保存 handler？
+
+底層 client 設定的是 `MqttManager.on_message`，不是每次呼叫 `subscribe()` 時傳入的 `handle_cmd`。所以 `subscribe(topic, callback=handle_cmd)` 的 callback 參數是 adapter 自己的責任；若不保存它，底層可能成功訂閱，卻沒有下一個應用入口：
+
+```text
+topic 訂閱成功
+  ≠ callback handler 已接通
+  ≠ payload 已解析
+  ≠ 命令已受理
+```
+
+這是典型的介面契約問題：每一層單獨看似成功，端到端資料流仍然可以斷裂。測試因此必須模擬底層真正的同步呼叫，而不是只檢查 `subscribe()` 被呼叫。
+
+#### 4. 為什麼 callback 只做快速派送？
+
+callback 是函式庫交付訊息的邊界，不是整個控制流程的容器。若在其中等待 Broker、重新量測感測器、執行 LED 閃爍或直接寫 GPIO，就會把網路協定、排程、控制政策與硬體所有權綁在一起。較好的設計是：
+
+1. callback 快速取得資料並驗證基本格式。
+2. 將合法資料轉成內部命令或排程必要的 task。
+3. 由共同服務回傳 receipt，讓來源知道受理或拒絕。
+4. 由唯一 owner 依序執行硬體動作。
+
+「快速」不是保證固定毫秒數，而是避免在 callback 中做不可控長工作；實際上限仍須依 ESP32 負載、網路與訊息量量測。
+
+#### 5. 用證據區分完成階段
+
+以 `led:4` 為例，至少有以下不同證據：
+
+| 證據 | 說明 |
+|---|---|
+| callback 被呼叫 | adapter 收到函式庫交付的參數 |
+| handler 完成解析 | payload 符合目前 wire format |
+| `CommandService` 回 receipt | 命令已受理或明確拒絕 |
+| `LedController` 記錄 applied | 軟體 owner 已執行輸出 |
+| 外部感測到 LED 變紅 | 需要實機與電氣／光學驗證，本專案目前沒有 LED 回授 |
+
+因此 `wait_connected()` 成功只代表連線確認，不代表訂閱在重連後存在，更不代表 LED 已套用。QoS、Broker ACK、應用 receipt 與硬體回授是不同層次的保證，不能用一個「成功」欄位取代。
+
+#### 6. 學生實作與檢查順序
+
+修改 MQTT adapter 時，依下列順序檢查，比直接改 `async` 關鍵字可靠：
+
+1. 打開實際使用的函式庫，找出 callback 的參數、呼叫方式與是否 `await`。
+2. 寫一個 fake client，讓它以相同方式同步呼叫 callback。
+3. 驗證 adapter 有保存應用 handler，並保留 `topic`、`msg`、`retained` 三個參數。
+4. 驗證 payload 解析後進入共用命令入口，而不是直接碰 GPIO。
+5. 分別測試 callback 收到、命令受理、owner 套用與失敗結果。
+6. 另測試連線逾時與重連重新訂閱；不要把 `wait_connected()` 當成全部恢復。
+
+本專案的 `test_synchronous_callback_dispatches_registered_handler` 驗證第一個 adapter 邊界；`test_mqtt_command_reaches_command_service` 驗證命令是否穿過第二個邊界。這些桌面測試證明的是 fake 路徑，不是 ESP32、真 Broker 或外部訂閱者的端到端結果。這正是物聯網架構與純函式呼叫的差異：除了程式碼本身，還要把網路交付、時間、資源、裝置輸出與驗證證據分層說清楚。
+
 ### E03 Schema、QoS、retain、session 與 LWT
 
 - **使用情境：**訊息需跨版本、辨識重複、通知在線狀態或在重連後恢復時。
