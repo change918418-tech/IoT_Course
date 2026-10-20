@@ -3,7 +3,29 @@
 > 本講義以目前 `refactor/architecture-foundation` 分支的 P1 實作為準：`SensorSnapshot`、`CommandService`、`LedController` 已整合按鈕、Web、MQTT 與光感來源。舊版 token／多入口設計保留作歷史比較，不可與目前程式介面混用。
 
 歷史紀錄中的 `feature/light-led-alert` 與 `light-led-alert-validated-20261006` 只保存舊版紅閃驗收背景；目前部署基準是 `refactor/architecture-foundation` 的 P1 commit `defafb6`。舊版驗證只針對紅閃功能，不代表全系統效能已驗證。
-公開 `config.example.py` 的示例門檻為 1000／1100；本機私人 `config.py` 可保留依裝置校準的 `LIGHT_ALERT_TRIGGER_ADC = 500`，部署時不得用公開範例覆蓋私人 WiFi／密碼或校準值。
+公開 `config.example.py` 預設 `LIGHT_DARK_WHEN_HIGH = False`，表示 ADC 越低越暗，示例門檻為 1000／1100。若模組是 ADC 越高越暗，私人 `config.py` 必須改為 `True` 並依實測校準；部署時不得用公開範例覆蓋私人 WiFi／密碼或校準值。
+
+## 光感極性與本裝置校準
+
+光感模組的分壓接法不同，ADC 方向也會不同，不能一律假設數值越低越暗：
+
+| 設定 | 暗判斷 | 重新允許判斷 | 適用情況 |
+|---|---|---|---|
+| `LIGHT_DARK_WHEN_HIGH = False` | ADC `< trigger` | ADC `>= reset` | ADC 越低越暗；公開範例為 1000／1100 |
+| `LIGHT_DARK_WHEN_HIGH = True` | ADC `> trigger` | ADC `<= reset` | ADC 越高越暗 |
+
+本裝置目前實測有光約 1110、無光約 2700，屬於「ADC 越高越暗」。可先在裝置私人 `config.py` 使用：
+
+```python
+LIGHT_ALERT_ENABLED = True
+LIGHT_DARK_WHEN_HIGH = True
+LIGHT_ALERT_TRIGGER_ADC = 2200
+LIGHT_ALERT_RESET_ADC = 1600
+```
+
+此設定在 ADC 高於 2200 時提交低光警示；警示後必須降至 1600 以下才重新允許。1600～2200 是遲滯區，避免讀值在單一門檻附近波動時重複觸發。2200／1600 是依 1110／2700 兩個觀測值選出的保守起點，不是所有裝置的固定值；應再觀察實際環境波動後調整。以下 1000／1100 範例描述的是公開預設的「低值越暗」模式。
+`/api/data` 的 `light_thresholds` 同時回傳 `trigger`、`reset` 與 `dark_when_high`；網頁依方向顯示 `暗 > 2200`／`亮 ≤ 1600` 或預設的 `暗 < 1000`／`亮 ≥ 1100`。若任一門檻高於 2048，圖表 Y 軸擴展至 4095，確保兩條線都可見。
+
 
 ## 操作規則與討論結論
 
@@ -45,14 +67,14 @@ ADC 嚴格低於 1000 時，保存 LED 正常色碼與亮滅狀態，紅亮 300 
 ## 呼叫鏈與狀態生命週期
 
 1. `main()` 建立 `SensorSnapshot`、`LedController`、`CommandService`，並安排唯一的 `led_controller.run()` owner task。
-2. `light_sensor_task()` 每 50 ms 讀 ADC；先更新 `SensorSnapshot`，只有讀值有效且 `armed=true`、低於 `LIGHT_ALERT_TRIGGER_ADC` 時，才呼叫 `CommandService.submit('low_light_alert', 'light')`。
+2. `light_sensor_task()` 每 50 ms 讀 ADC 並更新 `SensorSnapshot`；`LIGHT_DARK_WHEN_HIGH` 決定低光是高於或低於 `LIGHT_ALERT_TRIGGER_ADC`，只有讀值有效且 `armed=true` 時才提交 `low_light_alert`。
 3. `CommandService` 產生 request ID，交給 `LedController.submit_command()`；警示受理時立即設定 `_reserved=true`，清除尚未執行的一般命令並回覆其 `alert_started`。
 4. owner 取到警示後建立 `_effect`，保存 `(_desired_color, _enabled)`；依 `LIGHT_ALERT_ON_MS`、`LIGHT_ALERT_OFF_MS` 與 `LIGHT_ALERT_BLINK_COUNT` 推進紅色 4／全滅 0。
 5. 警示完成後恢復保存的正常狀態，將 receipt 標為 `executed`，再解除 reserved；GPIO 只由 owner 寫入。
-6. `armed` 仍由光照 producer 管理：警示後讀到 `LIGHT_ALERT_RESET_ADC` 以上才重新允許下一次低光警示。
+6. `armed` 仍由光照 producer 管理：低值越暗模式在 ADC 達 `reset` 以上重新允許；高值越暗模式在 ADC 降至 `reset` 以下重新允許。
 7. `main()` 清理呼叫 `request_stop()`；owner 的 `finally` 取消未完成結果、熄燈並設定 stopped Event。下次重啟建立新物件。
 
-正常色碼、快照、effect 與 armed 都只在 RAM，不寫 Flash。警示期間取樣持續，但不重新允許或排隊警示；完成後只有再次取樣到解除閾值才 rearm。閾值由裝置 `config.py` 決定，公開範例為 1000／1100，私人裝置可保留已校準值。
+正常色碼、快照、effect 與 armed 都只在 RAM，不寫 Flash。警示期間取樣持續，但不重新允許或排隊警示；完成後只有取樣跨過目前極性所定義的解除閾值才 rearm。閾值與極性由裝置私人 `config.py` 決定。
 
 `LightSensor.read()` 失敗時保留 last-good value，但 `light_sensor_task()` 會檢查 `last_error`，未知或失敗讀值不提交警示命令。閃爍時間是非同步設定值，受其他協程影響，非硬體精準 3 秒。
 

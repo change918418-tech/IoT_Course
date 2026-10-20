@@ -352,7 +352,11 @@
             const trigger = Number(rawThresholds?.trigger);
             const reset = Number(rawThresholds?.reset);
             if (Number.isFinite(trigger) && Number.isFinite(reset)) {
-                lightThresholds = {trigger, reset};
+                lightThresholds = {
+                    trigger,
+                    reset,
+                    darkWhenHigh: rawThresholds?.dark_when_high === true
+                };
             }
         }
 
@@ -361,9 +365,11 @@
             const ctx = chart.ctx;
             const left = chart.bbox.left;
             const right = left + chart.bbox.width;
+            const darkOperator = lightThresholds.darkWhenHigh ? '> ' : '< ';
+            const resetOperator = lightThresholds.darkWhenHigh ? '≤ ' : '≥ ';
             const thresholds = [
-                {value: lightThresholds.trigger, label: '暗 ' + lightThresholds.trigger, labelOffset: 10},
-                {value: lightThresholds.reset, label: '亮 ' + lightThresholds.reset, labelOffset: -10}
+                {value: lightThresholds.trigger, label: '暗 ' + darkOperator + lightThresholds.trigger, labelOffset: 10},
+                {value: lightThresholds.reset, label: '亮 ' + resetOperator + lightThresholds.reset, labelOffset: -10}
             ];
             ctx.save();
             ctx.strokeStyle = LIGHT_THRESHOLD_COLOR;
@@ -396,7 +402,10 @@
         const statusNow = () => performance.now();
 
         function getLightChartMax() {
-            return lightHistory.some(value => value > LIGHT_DEFAULT_MAX)
+            const thresholdAboveDefault = lightThresholds
+                && (lightThresholds.trigger > LIGHT_DEFAULT_MAX
+                    || lightThresholds.reset > LIGHT_DEFAULT_MAX);
+            return thresholdAboveDefault || lightHistory.some(value => value > LIGHT_DEFAULT_MAX)
                 ? LIGHT_ADC_MAX
                 : LIGHT_DEFAULT_MAX;
         }

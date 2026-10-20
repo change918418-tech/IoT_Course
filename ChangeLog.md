@@ -16,6 +16,16 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261020-036｜支援 ADC 越高越暗的光感模組
+
+- **類別：**需求變更（硬體校準與控制方向）。
+- **日期／紀錄時間：**2026-10-20 21:50:56 +08:00，工具取得台北時間。
+- **原因：**使用者回報實機有光約 1110、無光約 2700，代表該分壓接法是 ADC 越高越暗；現有程式固定以 ADC 低於 trigger 判定暗，會使低光警示方向相反。
+- **作法：**新增 `LIGHT_DARK_WHEN_HIGH` 設定；`tasks.light_sensor_task()` 與 `hardware.sensors.LightSensor` 依極性選擇比較方向，同時保留既有低值越暗模式。`/api/data.light_thresholds` 新增 `dark_when_high`；`index.html` 依方向顯示 `暗 >`／`亮 ≤` 或 `暗 <`／`亮 ≥`，且門檻超過 2048 時將圖表 Y 軸擴展至 4095。公開範例維持低值越暗預設，並記錄本裝置可先使用高值越暗、trigger 2200、reset 1600。更新 `LIGHT_LED_ALERT_GUIDE.md` 的校準與部署說明。
+- **影響：**本裝置在 ADC 高於 2200 時觸發低光警示，降至 1600 以下重新 armed；1600～2200 為遲滯區。2200／1600 是依兩個實測端點選出的保守起點，仍應依現場波動調整。未設定新欄位的既有裝置維持原行為。
+- **驗證：**`python -B -m unittest discover -s tests -v` 通過 42/42，包含 2700 觸發、持續暗不重複、1110 重新 armed、再次 2700 觸發，以及 `LightSensor` 高值越暗判斷；`node tests/test_led_polling.cjs`、`node tests/test_rfid_ui.cjs` 通過，確認圖表顯示 `暗 > 2200`／`亮 ≤ 1600` 且 Y 軸擴展至 4095；指定 Python 檔案 `py_compile` 通過。`LIGHT_LED_ALERT_GUIDE.md` 沒有 Mermaid 區塊，無需 Mermaid parser。未執行 ESP32 實機部署驗證。
+- **部署／回復：**上傳 `tasks.py`、`web_server.py`、`index.html`、`hardware/sensors.py`，並只在 ESP32 既有私人 `config.py` 加入 `LIGHT_DARK_WHEN_HIGH = True`、`LIGHT_ALERT_TRIGGER_ADC = 2200`、`LIGHT_ALERT_RESET_ADC = 1600`；不要用 `config.example.py` 覆蓋 Wi-Fi profiles。回復時移除新極性欄位並同步還原四個程式檔案。
+
 ## CHG-20261020-035｜相容舊版私人設定的光照門檻
 
 - **類別：**BUG。

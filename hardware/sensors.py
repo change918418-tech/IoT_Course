@@ -72,13 +72,21 @@ class LightSensor:
         if threshold is None:
             threshold = getattr(config, 'LIGHT_ALERT_TRIGGER_ADC', 1000)
         value = self.read()
-        return value is not None and value < threshold
+        if value is None:
+            return False
+        if getattr(config, 'LIGHT_DARK_WHEN_HIGH', False):
+            return value > threshold
+        return value < threshold
 
     def is_bright(self, threshold=None):
         if threshold is None:
             threshold = getattr(config, 'LIGHT_ALERT_RESET_ADC', 1100)
         value = self.read()
-        return value is not None and value > threshold
+        if value is None:
+            return False
+        if getattr(config, 'LIGHT_DARK_WHEN_HIGH', False):
+            return value <= threshold
+        return value > threshold
 
     def get_brightness_percent(self):
         if self.current_value is None:

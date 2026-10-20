@@ -154,6 +154,41 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshots[0], (trigger - 1, None))
         self.assertEqual(self.controller._queue[0][2]['source'], 'light')
 
+    async def test_high_adc_dark_mode_triggers_and_rearms(self):
+        readings = iter([2700, 2600, 1110, 2700])
+        submitted = []
+
+        class Light:
+            last_error = None
+            def read(self):
+                return next(readings)
+
+        class Commands:
+            def submit(self, kind, source):
+                submitted.append((kind, source))
+                return {'status': 'accepted'}
+
+        calls = 0
+        async def sleep(_):
+            nonlocal calls
+            calls += 1
+            if calls == 4:
+                raise StopCycles()
+
+        config = __import__('config')
+        task = load_task(
+            'light_sensor_task',
+            uasyncio=types.SimpleNamespace(sleep_ms=sleep))
+        with patch.object(config, 'LIGHT_DARK_WHEN_HIGH', True, create=True), \
+                patch.object(config, 'LIGHT_ALERT_TRIGGER_ADC', 2200), \
+                patch.object(config, 'LIGHT_ALERT_RESET_ADC', 1600):
+            with self.assertRaises(StopCycles):
+                await task(Light(), Commands())
+        self.assertEqual(submitted, [
+            ('low_light_alert', 'light'),
+            ('low_light_alert', 'light'),
+        ])
+
     async def test_light_error_does_not_submit_alert(self):
         class Light:
             last_error = 'adc failure'

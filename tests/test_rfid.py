@@ -132,7 +132,8 @@ class RfidTests(unittest.TestCase):
             self.assertEqual(data['light'], 0)
             self.assertEqual(data['light_thresholds'], {
                 'trigger': config.LIGHT_ALERT_TRIGGER_ADC,
-                'reset': config.LIGHT_ALERT_RESET_ADC
+                'reset': config.LIGHT_ALERT_RESET_ADC,
+                'dark_when_high': getattr(config, 'LIGHT_DARK_WHEN_HIGH', False),
             })
             self.assertEqual(data['rfid']['error'], 'bad "card"')
             self.assertEqual(data['rfid']['last_uid'], '0102030404')

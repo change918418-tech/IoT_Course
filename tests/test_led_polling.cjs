@@ -18,6 +18,7 @@ function FakeUPlot(options, data, element) {
     this.ctx = {
         strokeCount: 0,
         fillTextCount: 0,
+        labels: [],
         save() {},
         restore() {},
         setLineDash() {},
@@ -25,7 +26,10 @@ function FakeUPlot(options, data, element) {
         moveTo() {},
         lineTo() {},
         stroke: () => { this.ctx.strokeCount += 1; },
-        fillText: () => { this.ctx.fillTextCount += 1; }
+        fillText: text => {
+            this.ctx.fillTextCount += 1;
+            this.ctx.labels.push(text);
+        }
     };
     this.valToPos = (value, key) => {
         const [min, max] = this.options.scales[key].range;
@@ -93,17 +97,23 @@ const response = value => ({ok: true, json: async () => value});
     // A sensor success proves connection health, never refreshes LED validity.
     now = 5001;
     const healthySensor = context.updateData();
-    requests.filter(r => r.url === '/api/data').at(-1).gate.resolve(response({light: 123, light_thresholds: {trigger: 500, reset: 1100}, led: {available:true, alert_active:false}}));
+    requests.filter(r => r.url === '/api/data').at(-1).gate.resolve(response({
+        light: 1110,
+        light_thresholds: {trigger: 2200, reset: 1600, dark_when_high: true},
+        led: {available:true, alert_active:false}
+    }));
     await healthySensor;
     const initialLight = context.getLightChartDiagnostics();
     assert.equal(initialLight.ready, true);
     assert.equal(initialLight.sampleCount, 1);
-    assert.equal(initialLight.scaleMax, 2048);
+    assert.equal(initialLight.scaleMax, 4095);
     assert.equal(initialLight.xMax, 1);
-    assert.equal(initialLight.thresholds.trigger, 500);
-    assert.equal(initialLight.thresholds.reset, 1100);
+    assert.equal(initialLight.thresholds.trigger, 2200);
+    assert.equal(initialLight.thresholds.reset, 1600);
+    assert.equal(initialLight.thresholds.darkWhenHigh, true);
     assert.equal(context.uPlot.instance.ctx.strokeCount, 2);
     assert.equal(context.uPlot.instance.ctx.fillTextCount, 2);
+    assert.deepEqual(context.uPlot.instance.ctx.labels.slice(-2), ['暗 > 2200', '亮 ≤ 1600']);
     context.updateLightChart(4095);
     context.updateLightChart(0);
     const expandedLight = context.getLightChartDiagnostics();

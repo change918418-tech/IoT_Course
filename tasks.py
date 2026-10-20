@@ -201,9 +201,14 @@ async def light_sensor_task(light_sensor, command_service, sensor_snapshot=None)
                 await uasyncio.sleep_ms(config.LIGHT_POLL_INTERVAL_MS)
                 continue
             if getattr(config, 'LIGHT_ALERT_ENABLED', True):
-                if brightness >= getattr(config, 'LIGHT_ALERT_RESET_ADC', 1100):
+                trigger = getattr(config, 'LIGHT_ALERT_TRIGGER_ADC', 1000)
+                reset = getattr(config, 'LIGHT_ALERT_RESET_ADC', 1100)
+                dark_when_high = getattr(config, 'LIGHT_DARK_WHEN_HIGH', False)
+                is_reset = brightness <= reset if dark_when_high else brightness >= reset
+                is_dark = brightness > trigger if dark_when_high else brightness < trigger
+                if is_reset:
                     armed = True
-                elif armed and brightness < getattr(config, 'LIGHT_ALERT_TRIGGER_ADC', 1000):
+                elif armed and is_dark:
                     receipt = command_service.submit('low_light_alert', 'light')
                     if receipt['status'] == 'accepted':
                         armed = False

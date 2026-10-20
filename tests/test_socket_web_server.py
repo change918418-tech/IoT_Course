@@ -109,6 +109,7 @@ class SocketWebServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(res.body)['light_thresholds'], {
                 'trigger': 1000,
                 'reset': 1100,
+                'dark_when_high': False,
             })
         finally:
             if original_trigger is not missing:
