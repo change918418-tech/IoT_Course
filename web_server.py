@@ -165,13 +165,15 @@ class SocketApp:
                     body = await reader.read(content_length)
 
             req = Request(method=method, path=path, headers=headers, body=body)
+            print(f"[Web] 請求: {method} {path}")
             res = await self.dispatch_request(req)
             if res is None:
                 res = Response('Not Found', status_code=404)
 
             await self._write_response(writer, res)
-        except Exception:
-            pass
+            print(f"[Web] 回應完成: {method} {path} -> {res.status_code}")
+        except Exception as e:
+            print(f"[Web] 連線處理異常: {e}")
         finally:
             try:
                 writer.close()
@@ -207,9 +209,11 @@ class SocketApp:
             await writer.drain()
 
         if body_bytes is not None:
-            writer.write(body_bytes)
-            if hasattr(writer, 'drain'):
-                await writer.drain()
+            chunk_size = 1024
+            for i in range(0, len(body_bytes), chunk_size):
+                writer.write(body_bytes[i:i + chunk_size])
+                if hasattr(writer, 'drain'):
+                    await writer.drain()
         elif hasattr(res.body, 'read'):
             f = res.body
             try:
@@ -323,6 +327,22 @@ async def index_html(request):
     if HTML_PAGE is None:
         load_html()
     return Response(HTML_PAGE, headers={'Content-Type': 'text/html; charset=utf-8'})
+
+@app.route('/test')
+async def test_page(request):
+    """簡易測試頁面，確認 Socket Web Server 連線與回應正常。"""
+    html = """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>ESP32 Socket 測試</title></head>
+<body style="font-family:sans-serif; text-align:center; padding:50px; background:#f4f6f9;">
+    <h1 style="color:#2ecc71;">✅ ESP32 Socket Web Server 運行正常！</h1>
+    <p style="color:#555; font-size:18px;">原生 Socket 網頁伺服器已成功連線並傳輸 HTML。</p>
+    <hr style="margin:30px auto; max-width:400px; border:1px solid #ddd;">
+    <p><a href="/" style="font-size:20px; color:#3498db; text-decoration:none; font-weight:bold;">👉 前往完整專題儀表板 (/)</a></p>
+    <p><a href="/api/data" style="font-size:16px; color:#e67e22; text-decoration:none;">🔍 查看 JSON 資料 (/api/data)</a></p>
+</body>
+</html>"""
+    return Response(html, headers={'Content-Type': 'text/html; charset=utf-8'})
 
 
 @app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')

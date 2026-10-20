@@ -16,6 +16,23 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261020-034｜新增獨立 Web 測試工具、分塊傳輸與連線診斷日誌
+
+- **類別：**BUG 修正與需求變更（傳輸穩定性與測試診斷）。
+- **日期／紀錄時間：**2026-10-20 16:36:15 +08:00，工具取得台北時間。
+- **原因：**使用者回報部署至 ESP32 後瀏覽器可能出現畫面未顯示。分析原因為 MicroPython Socket 的底層 TCP 傳送緩衝區較小（約 1460～2048 位元組），若一次性向 Socket 寫入 31 KB 的 `index.html`，易因緩衝區滿載造成網頁傳輸中斷或截斷；同時缺少獨立的最小化測試工具以排查連線狀態。
+- **作法：**
+  1. 修改 `web_server.py`：在 `_write_response` 將大封包以 1024 位元組分塊推送並呼叫 `await writer.drain()`，確保完整 HTML 平滑送達瀏覽器；在 `_handle_client` 加入詳細請求與回應日誌（`[Web] 請求: ...`），便於在 Thonny 即時查看連線動態。
+  2. 在 `web_server.py` 新增 `/test` 輕量測試路由，免讀取 Flash 檔案即可驗證 Socket 傳輸。
+  3. 新增獨立測試腳本 `mini_web_test.py`，可於 Thonny 獨立一鍵執行，連線 Wi-Fi 並啟動極簡 Socket 伺服器，呈現即時 Heap 記憶體與綠色連線成功提示。
+  4. 更新 `tests/test_socket_web_server.py` 新增 `/test` 路由測試。
+- **影響：**徹底解決 ESP32 大檔案單次寫入截斷問題，並提供零干擾的獨立連線測試工具。
+- **驗證：**
+  - `python -B -m unittest discover -s tests -v` 39/39 全部通過。
+  - `node tests/test_led_polling.cjs` 與 `node tests/test_rfid_ui.cjs` 通過。
+  - `python -B -m py_compile web_server.py mini_web_test.py tests/test_socket_web_server.py` 通過無語法錯誤。
+- **部署／回復：**上傳 `web_server.py` 覆蓋 ESP32 既有檔案，或直接在 Thonny 執行 `mini_web_test.py` 驗證。
+
 ## CHG-20261020-033｜以原生 Socket / uasyncio 輕量 Web 伺服器取代 Microdot
 
 - **類別：**需求變更（記憶體優化與架構重構）。

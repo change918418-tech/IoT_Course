@@ -56,6 +56,13 @@ class SocketWebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('text/html', res.headers.get('Content-Type', ''))
         self.assertIn('<!DOCTYPE html>', res.body)
 
+    async def test_get_test_page(self):
+        req = self.web.Request(method='GET', path='/test')
+        res = await self.web.app.dispatch_request(req)
+        self.assertEqual(res.status_code, 200)
+        self.assertIn('text/html', res.headers.get('Content-Type', ''))
+        self.assertIn('ESP32 Socket Web Server 運行正常', res.body)
+
     async def test_get_static_assets(self):
         req_js = self.web.Request(method='GET', path='/assets/uplot/1.6.32/uPlot.iife.min.js')
         res_js = await self.web.app.dispatch_request(req_js)
