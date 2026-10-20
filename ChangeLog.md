@@ -16,6 +16,17 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261020-032｜保存 omp 免費 LLM API 評估指南
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-10-20 14:53:14 +08:00，工具取得台北時間。
+- **原因：**前一輪免費 LLM API 的比較與 omp 串接建議只存在對話中，使用者要求保存為專案 Markdown 文件，供後續查閱與更新。
+- **作法：**新增 `FREE_LLM_API_OMP_GUIDE.md`，整理 Google Gemini、Groq、OpenRouter、Mistral、Ollama、Cerebras、Cloudflare Workers AI 與 Hugging Face Inference Providers 的適用情境、免費限制、弱點、官方來源及 omp 設定範例；明確區分永久／固定免費層、試用額度與本機 API。未修改程式、設定或部署清單。
+- **影響：**學生與維護者可在 repository 中查閱免費 API 選擇、資料隱私注意事項與 PowerShell 設定方式；文件明確提醒模型 ID、額度與政策可能變動。
+- **驗證：**檢查新增 Markdown 的 staged 差異與 `git diff --check`；文件未包含 Mermaid 區塊，因此不需 Mermaid parser 驗證。未執行各供應商 API 實測或本機硬體 benchmark。
+- **部署／回復：**只需同步 `FREE_LLM_API_OMP_GUIDE.md` 與 `ChangeLog.md`，不需上傳 ESP32。回復時使用 Git revert 移除本次文件與紀錄；API key 不得寫入文件或 repository。
+
+
 ## CHG-20261020-031｜將投影片納入 Git 版控並推送 main
 
 - **類別：**需求變更（教材檔案與版控規則）。
