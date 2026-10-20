@@ -386,8 +386,8 @@ async def api_data(request):
         'light': light,
         'sensor': snapshot,
         'light_thresholds': {
-            'trigger': config.LIGHT_ALERT_TRIGGER_ADC,
-            'reset': config.LIGHT_ALERT_RESET_ADC
+            'trigger': getattr(config, 'LIGHT_ALERT_TRIGGER_ADC', 1000),
+            'reset': getattr(config, 'LIGHT_ALERT_RESET_ADC', 1100)
         },
         'status': snapshot['status'],
         'rfid': dict(rfid_state),

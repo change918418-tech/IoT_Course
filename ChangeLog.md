@@ -16,6 +16,16 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261020-035｜相容舊版私人設定的光照門檻
+
+- **類別：**BUG。
+- **日期／紀錄時間：**2026-10-20 17:25:11 +08:00，工具取得台北時間。
+- **原因：**ESP32 保留的舊版私人 `config.py` 沒有 `LIGHT_ALERT_TRIGGER_ADC` 與 `LIGHT_ALERT_RESET_ADC`；`GET /api/data` 直接存取這兩個屬性而拋出 `AttributeError`，使感測輪詢中斷並造成完整網頁資料不顯示。LED 與移動狀態端點仍可回 200，因此問題只出現在感測資料通道。
+- **作法：**修改 `web_server.py`，以 `getattr()` 讀取光照觸發／復位門檻，缺少時分別使用與 `hardware/sensors.py`、`tasks.py` 一致的 1000／1100 相容預設值；新增 Socket Web 回歸測試，實際移除兩個設定屬性後確認 `/api/data` 仍回 200 與正確門檻。
+- **影響：**舊版私人設定可繼續使用，不覆蓋 Wi-Fi profiles；有明確設定的裝置仍優先使用自己的門檻值。
+- **驗證：**`python -B -m unittest discover -s tests -v` 通過 40/40，包含缺少兩個門檻屬性時 `/api/data` 回 200 與 1000／1100 預設值；`node tests/test_led_polling.cjs`、`node tests/test_rfid_ui.cjs` 通過；`python -B -m py_compile web_server.py tests/test_socket_web_server.py` 通過。未執行 ESP32 實機驗證。
+- **部署／回復：**只需上傳新版 `web_server.py` 並重啟 ESP32；不要覆蓋裝置上的私人 `config.py`。回復時還原 `web_server.py`，但舊版設定會再次使 `/api/data` 失敗。
+
 ## CHG-20261020-034｜新增獨立 Web 測試工具、分塊傳輸與連線診斷日誌
 
 - **類別：**BUG 修正與需求變更（傳輸穩定性與測試診斷）。

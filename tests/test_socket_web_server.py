@@ -93,6 +93,29 @@ class SocketWebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('rfid', data)
         self.assertIn('motion', data)
 
+    async def test_api_data_uses_threshold_defaults_for_legacy_config(self):
+        config = self.web.config
+        missing = object()
+        original_trigger = getattr(config, 'LIGHT_ALERT_TRIGGER_ADC', missing)
+        original_reset = getattr(config, 'LIGHT_ALERT_RESET_ADC', missing)
+        try:
+            if original_trigger is not missing:
+                delattr(config, 'LIGHT_ALERT_TRIGGER_ADC')
+            if original_reset is not missing:
+                delattr(config, 'LIGHT_ALERT_RESET_ADC')
+            res = await self.web.app.dispatch_request(
+                self.web.Request(method='GET', path='/api/data'))
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(json.loads(res.body)['light_thresholds'], {
+                'trigger': 1000,
+                'reset': 1100,
+            })
+        finally:
+            if original_trigger is not missing:
+                config.LIGHT_ALERT_TRIGGER_ADC = original_trigger
+            if original_reset is not missing:
+                config.LIGHT_ALERT_RESET_ADC = original_reset
+
     async def test_api_led_endpoints(self):
         # Toggle
         res_toggle = await self.web.app.dispatch_request(
