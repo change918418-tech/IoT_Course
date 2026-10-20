@@ -16,6 +16,26 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261020-033｜以原生 Socket / uasyncio 輕量 Web 伺服器取代 Microdot
+
+- **類別：**需求變更（記憶體優化與架構重構）。
+- **日期／紀錄時間：**2026-10-20 15:56:35 +08:00，工具取得台北時間。
+- **原因：**ESP32 執行 Microdot 框架消耗過多 RAM / Heap 記憶體（約 20～40 KB），導致在整合多感測器、MQTT 與 RFID 時記憶體壓力過大。使用者要求在維持與現行專題網頁 UI、API 契約與所有操作行為完全一致的前提下，新開分支改以原生 Socket / uasyncio 實作超輕量 Web 伺服器。
+- **作法：**
+  1. 開設並切換至新開發分支 `feature/socket-web-server`。
+  2. 重構 `web_server.py`：完全移除對 `microdot` 套件的匯入與相依；實作輕量化 `SocketApp`、`Request` 與 `Response` 類別，支援文字／JSON／檔案串流（`Response.send_file` 以 1024 位元組分塊串流以避免一次載入 50 KB uPlot 檔案耗盡記憶體）、動態路徑參數（`<int:command_id>`）與相容既有 `TestClient` 的非同步 `body_iter`。
+  3. 完整保留所有 14 個 Web 路由與狀態碼契約（`GET /`、`GET /index.html`、uPlot CSS/JS 靜態資產、`/api/data`、`/api/motion/status`、`/api/led/toggle`、`/api/led/commands`、`/api/led/mode`、`/api/led/status`、`/api/led/commands/<id>`、`/api/publish`、`/api/publish/status`、`/api/status`）。
+  4. 新增 `tests/test_socket_web_server.py`，完整涵蓋所有端點合約與本機真實 TCP Socket 通訊測試。
+  5. 更新 `main.py` 啟動橫幅與說明文字。
+- **影響：**ESP32 執行時期完全不需載入 Microdot 龐大框架，節省大量 Heap 空間；前端 `index.html`、CSS、JavaScript 與輪詢、控制邏輯 100% 保持相容，瀏覽器呈現與操作行為完全不變。
+- **驗證：**
+  - `python -B -m unittest discover -s tests -v` 全部 38/38 項測試通過（包含既有 33 項測試與新增 5 項 Socket 測試）。
+  - `node tests/test_led_polling.cjs` 通過。
+  - `node tests/test_rfid_ui.cjs` 通過。
+  - `python -B -m py_compile web_server.py main.py tests/test_socket_web_server.py` 通過無語法錯誤。
+  - 未執行 ESP32 實機或實體硬體燒錄驗證。
+- **部署／回復：**部署 `web_server.py`、`main.py` 並重啟 ESP32；若需回復，切換回 `main` 分支即可。
+
 ## CHG-20261020-032｜保存 omp 免費 LLM API 評估指南
 
 - **類別：**需求變更（教學文件）。

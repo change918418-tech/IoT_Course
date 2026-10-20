@@ -1,6 +1,6 @@
 """
-main.py - 主程式進入點（修正版 v1.2 - 含 Web Server）
-已整合 aiot_tools.py、ns_tools.py、mqtt_as 和 Microdot Web Server
+main.py - 主程式進入點（修正版 v1.2 - 含 Socket Web Server）
+已整合 aiot_tools.py、ns_tools.py、mqtt_as 和 輕量 Socket Web Server
 """
 
 import uasyncio
@@ -200,7 +200,7 @@ if __name__ == '__main__':
     print("\n")
     print("╔" + "═"*58 + "╗")
     print("║" + " "*12 + "IoT 教學專案 - ESP32 多感測器系統" + " "*12 + "║")
-    print("║" + " "*15 + "含 Web Server (Microdot)" + " "*19 + "║")
+    print("║" + " "*15 + "含 Web Server (Socket)" + " "*21 + "║")
     print("╚" + "═"*58 + "╝")
     print("\n")
     

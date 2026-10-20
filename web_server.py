@@ -1,16 +1,17 @@
 """
-web_server.py - Microdot Web Server for IoT System v1.2
-包含：
-  - 輕量級Web框架（Microdot）
-  - REST API 端點
-  - 前端 HTML UI（從 index.html 導入）
-  - WiFi IP 地址檢測和顯示
-  - ✅ 光照 ADC 數據支持
+web_server.py - 輕量化 Socket Web Server 模組 (取代 Microdot)
+以 uasyncio / 原生 Socket 處理 HTTP 請求，提供與專案完全相同的 Web API 與前端靜態頁面。
+大幅降低 MicroPython 在 ESP32 上的記憶體佔用。
 """
 
-from microdot import Microdot, Response
-import network
-import uasyncio
+try:
+    import network
+except ImportError:
+    network = None
+try:
+    import uasyncio
+except ImportError:
+    import asyncio as uasyncio
 try:
     import ujson as json
 except ImportError:
@@ -18,10 +19,226 @@ except ImportError:
 from hardware.rfid import new_rfid_state
 from hardware.motion import new_motion_state
 import config
+# ==================== 輕量級 HTTP Request / Response ====================
+
+class Request:
+    """輕量化 HTTP Request 物件，相容 Microdot 屬性存取契約。"""
+    def __init__(self, method='GET', path='/', headers=None, body=b''):
+        self.method = method
+        self.path = path
+        self.headers = headers or {}
+        self.body = body
+
+    @property
+    def json(self):
+        if not self.body:
+            return None
+        if isinstance(self.body, dict):
+            return self.body
+        try:
+            raw = self.body.decode('utf-8') if isinstance(self.body, (bytes, bytearray)) else self.body
+            return json.loads(raw)
+        except Exception:
+            return None
+
+
+class Response:
+    """輕量化 HTTP Response 物件，支援字串、位元組與檔案流 (send_file)。"""
+    def __init__(self, body='', status_code=200, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.body = body
+        self.reason = {
+            200: 'OK', 202: 'Accepted', 400: 'Bad Request', 404: 'Not Found',
+            409: 'Conflict', 429: 'Too Many Requests', 500: 'Internal Server Error',
+            503: 'Service Unavailable'
+        }.get(status_code, 'OK')
+        self.is_head = False
+
+    def complete(self):
+        if 'Content-Type' not in self.headers:
+            if isinstance(self.body, str):
+                self.headers['Content-Type'] = 'text/html; charset=utf-8'
+            elif isinstance(self.body, (bytes, bytearray)):
+                self.headers['Content-Type'] = 'application/octet-stream'
+
+    async def body_iter(self):
+        """非同步迭代產生器，相容 TestClient 與串流傳輸。"""
+        if isinstance(self.body, str):
+            yield self.body.encode('utf-8')
+        elif isinstance(self.body, (bytes, bytearray)):
+            yield self.body
+        elif hasattr(self.body, 'read'):
+            try:
+                while True:
+                    chunk = self.body.read(1024)
+                    if not chunk:
+                        break
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode('utf-8')
+                    yield chunk
+            finally:
+                if hasattr(self.body, 'close'):
+                    self.body.close()
+
+    @classmethod
+    def send_file(cls, filename, status_code=200, content_type=None, max_age=None):
+        headers = {}
+        if content_type:
+            headers['Content-Type'] = content_type
+        if max_age is not None:
+            headers['Cache-Control'] = f'max-age={max_age}'
+        try:
+            import os
+            stat = os.stat(filename)
+            headers['Content-Length'] = str(stat[6] if len(stat) > 6 else stat.st_size)
+            f = open(filename, 'rb')
+            return cls(body=f, status_code=status_code, headers=headers)
+        except Exception:
+            return cls('File not found', status_code=404)
+
+
+# ==================== 輕量級 Socket 應用核心 ====================
+
+class SocketApp:
+    """極簡的非同步 Socket HTTP 路由器，替代記憶體佔用龐大的 Microdot。"""
+    def __init__(self):
+        self.routes = []
+
+    def route(self, path, methods=None):
+        methods = [m.upper() for m in methods] if methods else ['GET']
+        def decorator(handler):
+            self.routes.append((methods, path, handler))
+            return handler
+        return decorator
+
+    async def dispatch_request(self, req):
+        """派發 HTTP 請求至對應的路由處理常式。"""
+        for methods, path_pattern, handler in self.routes:
+            if req.method in methods:
+                if '<int:command_id>' in path_pattern:
+                    prefix = path_pattern.split('<int:command_id>')[0]
+                    if req.path.startswith(prefix):
+                        param = req.path[len(prefix):]
+                        if param.isdigit():
+                            return await handler(req, int(param))
+                elif req.path == path_pattern:
+                    return await handler(req)
+        return Response('Not Found', status_code=404)
+
+    async def _handle_client(self, reader, writer):
+        """非同步讀取 Socket 請求、派發處理並回寫 HTTP 回應。"""
+        try:
+            line = await reader.readline()
+            if not line:
+                return
+            parts = line.decode('utf-8').strip().split()
+            if len(parts) < 2:
+                return
+            method = parts[0].upper()
+            full_path = parts[1]
+            path = full_path.split('?')[0]
+
+            headers = {}
+            content_length = 0
+            while True:
+                hline = await reader.readline()
+                if not hline or hline in (b'\r\n', b'\n'):
+                    break
+                try:
+                    hstr = hline.decode('utf-8').strip()
+                    if ':' in hstr:
+                        k, v = hstr.split(':', 1)
+                        k_lower = k.strip().lower()
+                        v_clean = v.strip()
+                        headers[k_lower] = v_clean
+                        if k_lower == 'content-length':
+                            content_length = int(v_clean)
+                except Exception:
+                    pass
+
+            body = b''
+            if content_length > 0:
+                if hasattr(reader, 'readexactly'):
+                    body = await reader.readexactly(content_length)
+                else:
+                    body = await reader.read(content_length)
+
+            req = Request(method=method, path=path, headers=headers, body=body)
+            res = await self.dispatch_request(req)
+            if res is None:
+                res = Response('Not Found', status_code=404)
+
+            await self._write_response(writer, res)
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                if hasattr(writer, 'wait_closed'):
+                    await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _write_response(self, writer, res):
+        """向 Socket 寫入 HTTP 狀態列、標頭與正文。"""
+        res.complete()
+        status_text = res.reason or 'OK'
+        header_lines = [
+            f"HTTP/1.1 {res.status_code} {status_text}\r\n",
+            "Connection: close\r\n"
+        ]
+
+        body_bytes = None
+        if isinstance(res.body, str):
+            body_bytes = res.body.encode('utf-8')
+        elif isinstance(res.body, (bytes, bytearray)):
+            body_bytes = res.body
+
+        if body_bytes is not None:
+            res.headers['Content-Length'] = str(len(body_bytes))
+
+        for k, v in res.headers.items():
+            header_lines.append(f"{k}: {v}\r\n")
+        header_lines.append("\r\n")
+
+        writer.write("".join(header_lines).encode('utf-8'))
+        if hasattr(writer, 'drain'):
+            await writer.drain()
+
+        if body_bytes is not None:
+            writer.write(body_bytes)
+            if hasattr(writer, 'drain'):
+                await writer.drain()
+        elif hasattr(res.body, 'read'):
+            f = res.body
+            try:
+                while True:
+                    chunk = f.read(1024)
+                    if not chunk:
+                        break
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode('utf-8')
+                    writer.write(chunk)
+                    if hasattr(writer, 'drain'):
+                        await writer.drain()
+            finally:
+                if hasattr(f, 'close'):
+                    f.close()
+
+    async def start_server(self, host='0.0.0.0', port=80, debug=False):
+        """啟動非同步 Socket 伺服器並持續監聽。"""
+        server = await uasyncio.start_server(self._handle_client, host, port)
+        if hasattr(server, 'wait_closed'):
+            await server.wait_closed()
+        else:
+            while True:
+                await uasyncio.sleep(3600)
+
 
 # ==================== 全局變數 ====================
 
-app = Microdot()
+app = SocketApp()
 
 # 由 main.py 設置的全局變數
 mqtt_manager = None
@@ -41,9 +258,8 @@ def load_html():
     try:
         with open('index.html', 'r', encoding='utf-8') as f:
             HTML_PAGE = f.read()
-        print("[Web] ✅ index.html 已載入")
     except Exception as e:
-        print(f"[Web] ❌ 載入 index.html 失敗: {e}")
+        print(f"[Web] 讀取 index.html 失敗: {e}")
         HTML_PAGE = '<html><head><meta charset="utf-8"><title>IoT Web Server</title></head><body><h1>IoT Web Server</h1><p>❌ index.html 文件未找到</p><p>錯誤詳情: {}</p></body></html>'.format(str(e))
 
 
@@ -51,21 +267,20 @@ def load_html():
 
 def get_wifi_ip():
     """
-    獲取 ESP32 WiFi IP 地址
-    返回: IP 地址字符串 或 None
+    獲取 ESP32 的 WiFi IP 地址
+    返回：IP 地址字串，若未連接則返回 None
     """
+    if network is None:
+        return None
     try:
         wlan = network.WLAN(network.STA_IF)
-        
-        if wlan.isconnected():
-            config = wlan.ifconfig()
-            ip = config[0]
-            return ip
+        if wlan.active() and wlan.isconnected():
+            return wlan.ifconfig()[0]
         else:
             return None
-    except:
+    except Exception as e:
+        print(f"[Web] 獲取 IP 失敗: {e}")
         return None
-
 
 def _sensor_field(name):
     if sensor_snapshot is None:
@@ -94,28 +309,19 @@ def get_current_light():
 
 @app.route('/')
 async def index(request):
-    """
-    主頁面：返回 HTML UI
-    """
+    """主頁面：返回 HTML UI"""
     print("[Web] GET / (主頁)")
-    
     if HTML_PAGE is None:
         load_html()
-    
-    # 正確的方式：設置 Content-Type 為 text/html
     return Response(HTML_PAGE, headers={'Content-Type': 'text/html; charset=utf-8'})
 
 
 @app.route('/index.html')
 async def index_html(request):
-    """
-    /index.html 路由（備用）
-    """
+    """/index.html 路由（備用）"""
     print("[Web] GET /index.html")
-    
     if HTML_PAGE is None:
         load_html()
-    
     return Response(HTML_PAGE, headers={'Content-Type': 'text/html; charset=utf-8'})
 
 
@@ -174,6 +380,7 @@ async def api_data(request):
     })
     return Response(response_json, headers={
         'Content-Type': 'application/json; charset=utf-8'})
+
 
 @app.route('/api/motion/status')
 async def api_motion_status(request):
@@ -270,7 +477,6 @@ async def api_led_command_result(request, command_id):
 async def api_publish(request):
     """
     API 端點：請求發布溫濕度數據到 MQTT。
-
     202 只代表請求已受理；實際結果由 /api/publish/status 查詢。
     """
     print("[Web] POST /api/publish")
@@ -317,10 +523,8 @@ async def api_publish_status(request):
 async def api_status(request):
     """
     API 端點：返回系統狀態
-    返回：{ status: 'ok', uptime: 運行時間 }
     """
     print("[Web] GET /api/status")
-    
     response_json = '{"status": "ok", "message": "System running"}'
     return Response(response_json, headers={'Content-Type': 'application/json; charset=utf-8'})
 
@@ -330,10 +534,10 @@ async def api_status(request):
 async def web_server_task():
     """
     Web Server 主任務
-    監聽 80 端口，提供 HTTP 服務
+    監聽 80 端口，提供 HTTP 服務 (原生 Socket / uasyncio 版本)
     """
     print("\n" + "="*60)
-    print("Web Server 初始化")
+    print("Socket Web Server 初始化")
     print("="*60 + "\n")
     
     # 先載入 HTML
@@ -351,11 +555,11 @@ async def web_server_task():
             print("[Web] ⚠️ 未能獲取 WiFi IP 地址")
             print("[Web] 訪問: http://ESP32_IP_ADDRESS")
         
-        print("[Web] Microdot Web 服務器啟動")
+        print("[Web] Socket Web 服務器啟動 (無 Microdot，超輕量)")
         print("[Web] 監聽端口: 80")
         print("[Web] 狀態: ✅ 運行中\n")
         
-        # 啟動 Web Server（阻塞）
+        # 啟動 Socket Web Server
         await app.start_server(host='0.0.0.0', port=80, debug=False)
     
     except Exception as e:
@@ -372,10 +576,6 @@ async def sensor_monitor_task():
     try:
         while True:
             await uasyncio.sleep(10)
-            
-            # 可在此添加定期檢查邏輯
-            # print("[Web] 傳感器監控中...")
-    
     except Exception as e:
         print(f"[Web] 傳感器監控異常: {e}")
 
