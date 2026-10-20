@@ -23,6 +23,8 @@ Thumbs.db
 
 # Local history backups
 *.bundle
+# Office temporary lock files; real presentation files remain trackable.
+~$*.pptx
 
 # Machine-specific settings, local firmware stubs and private recovery copies
 /.vscode/settings.json
