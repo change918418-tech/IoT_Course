@@ -86,6 +86,9 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.commands.submit('set_color', 'web', 5)
         self.controller._step(0)
         alert = self.commands.submit('low_light_alert', 'light')
+        self.assertEqual(
+            self.commands.snapshot()['active_effect'],
+            'low_light_alert')
         self.controller._step(0)
         for now in range(300, 3301, 300):
             self.controller._step(now)
@@ -94,6 +97,120 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot['desired_color'], 5)
         self.assertEqual(snapshot['applied_output'], 5)
         self.assertFalse(snapshot['alert_active'])
+        self.assertIsNone(snapshot['active_effect'])
+
+    async def test_green_flash_runs_three_times_and_restores_normal_state(self):
+        for initial_color in (0, 1, 2, 4):
+            with self.subTest(initial_color=initial_color):
+                hardware = Hardware()
+                controller = self.module.LedController(
+                    hardware, self.clock, mode='AUTO')
+                commands = self.command_module.CommandService(controller)
+                commands.submit('set_color', 'test', initial_color)
+                controller._step(0)
+                hardware.frames.clear()
+
+                effect = commands.submit(
+                    'green_flash_alert', 'button3')
+                self.assertEqual(effect['status'], 'accepted')
+                self.assertTrue(commands.busy)
+                self.assertEqual(
+                    commands.snapshot()['active_effect'],
+                    'green_flash_alert')
+                controller._step(1)
+                for now in range(301, 1802, 300):
+                    controller._step(now)
+
+                expected = [2, 0, 2, 0, 2, 0]
+                if initial_color != 0:
+                    expected.append(initial_color)
+                self.assertEqual(hardware.frames, expected)
+                self.assertEqual(
+                    commands.result(effect['request_id'])['status'],
+                    'executed')
+                snapshot = commands.snapshot()
+                self.assertEqual(snapshot['desired_color'], initial_color)
+                self.assertEqual(snapshot['applied_output'], initial_color)
+                self.assertFalse(snapshot['alert_active'])
+                self.assertIsNone(snapshot['active_effect'])
+                self.assertEqual(snapshot['alert_flash_count'], 0)
+
+    async def test_effects_reject_competing_effects_and_pending_changes(self):
+        pending = self.commands.submit('cycle', 'button1')
+        green = self.commands.submit('green_flash_alert', 'button3')
+        self.assertEqual(green['status'], 'accepted')
+        self.assertEqual(
+            self.commands.result(pending['request_id'])['reason'],
+            'alert_started')
+        for kind, source in (
+                ('cycle', 'button1'),
+                ('green_flash_alert', 'button3'),
+                ('low_light_alert', 'light')):
+            rejected = self.commands.submit(kind, source)
+            self.assertEqual(rejected['status'], 'rejected')
+            self.assertEqual(rejected['reason'], 'busy')
+
+        other = self.module.LedController(Hardware(), self.clock, mode='AUTO')
+        other_commands = self.command_module.CommandService(other)
+        self.assertEqual(
+            other_commands.submit('low_light_alert', 'light')['status'],
+            'accepted')
+        rejected_green = other_commands.submit(
+            'green_flash_alert', 'button3')
+        self.assertEqual(rejected_green['reason'], 'busy')
+
+    async def test_button3_submits_once_and_consumes_busy_press(self):
+        class Button:
+            def __init__(self):
+                self.press_rejected = False
+                self.releases = 0
+
+            async def wait_press(self, reject_if=None):
+                self.press_rejected = bool(reject_if and reject_if())
+
+            async def wait_release(self):
+                self.releases += 1
+                raise StopCycles()
+
+        task = load_task(
+            'button3_task',
+            uasyncio=types.SimpleNamespace(
+                sleep_ms=lambda _: None, sleep=lambda _: None))
+        button = Button()
+        with self.assertRaises(StopCycles):
+            await task(button, self.commands)
+        self.assertEqual(button.releases, 1)
+        self.assertEqual(self.controller._queue[0][0], 'green_flash_alert')
+        self.assertEqual(self.controller._queue[0][2]['source'], 'button3')
+
+        class BusyCommands:
+            busy = True
+
+            def submit(self, *args):
+                raise AssertionError('busy press must not submit')
+
+        busy_button = Button()
+        with self.assertRaises(StopCycles):
+            await task(busy_button, BusyCommands())
+        self.assertTrue(busy_button.press_rejected)
+        self.assertEqual(busy_button.releases, 1)
+
+    async def test_green_flash_gpio_failure_marks_request_failed(self):
+        class BrokenHardware:
+            def write(self, value):
+                if value != 0:
+                    raise OSError('fake green GPIO failure')
+
+        controller = self.module.LedController(
+            BrokenHardware(), self.clock, mode='AUTO')
+        commands = self.command_module.CommandService(controller)
+        effect = commands.submit('green_flash_alert', 'button3')
+        with self.assertRaises(OSError):
+            await controller.run()
+        result = commands.result(effect['request_id'])
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'fake green GPIO failure')
+        self.assertFalse(controller.busy)
 
     async def test_manual_mode_rejects_light_override(self):
         mode = self.commands.submit('set_mode', 'web', 'MANUAL')
@@ -130,8 +247,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(controller._stopped.is_set())
 
     async def test_light_producer_uses_command_service_and_snapshot(self):
-        trigger = __import__('config').LIGHT_ALERT_TRIGGER_ADC
-        readings = iter([trigger - 1, trigger])
+        readings = iter([999, 1000])
         snapshots = []
 
         class Light:
@@ -146,12 +262,15 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         async def sleep(_):
             raise StopCycles()
 
+        config = __import__('config')
         task = load_task(
             'light_sensor_task',
             uasyncio=types.SimpleNamespace(sleep_ms=sleep))
-        with self.assertRaises(StopCycles):
-            await task(Light(), self.commands, Snapshot())
-        self.assertEqual(snapshots[0], (trigger - 1, None))
+        with patch.object(config, 'LIGHT_DARK_WHEN_HIGH', False, create=True), \
+                patch.object(config, 'LIGHT_ALERT_TRIGGER_ADC', 1000):
+            with self.assertRaises(StopCycles):
+                await task(Light(), self.commands, Snapshot())
+        self.assertEqual(snapshots[0], (999, None))
         self.assertEqual(self.controller._queue[0][2]['source'], 'light')
 
     async def test_high_adc_dark_mode_triggers_and_rearms(self):

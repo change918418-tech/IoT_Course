@@ -67,7 +67,7 @@ sequenceDiagram
     participant MQTT as MqttManager
     participant Web as web_server 模組
     participant Scheduler as uasyncio
-    Entry->>HW: RgbLed()、Button(17/21)、DHT、LightSensor()
+    Entry->>HW: RgbLed()、Button(17/21/16)、DHT、LightSensor()
     Init->>Snapshot: 建立 SensorSnapshot
     Init->>Controller: 建立 LedController 與 CommandService
     Init->>HW: 初次 DHT 量測，更新 Snapshot
@@ -76,12 +76,12 @@ sequenceDiagram
     Init->>WiFi: await sync_time()
     Init->>MQTT: MqttManager(ssid, password, broker)
     Init->>MQTT: await connect()，最多三次初始嘗試
-    Init-->>Entry: 六個物件的 tuple
-    Entry->>Scheduler: 建立 publish_event = Event()
-    Entry->>Web: 指定五個共享物件參照
-    Entry->>Scheduler: await gather(九個任務)
+    Init-->>Entry: 十一個初始化物件的tuple
+    Entry->>Scheduler: 建立publish_event與motion_event
+    Entry->>Web: 指定七個共享物件參照
+    Entry->>Scheduler: await gather(十四個任務)
     Scheduler->>Web: web_server_task()
-    Web->>Web: load_html() 與 get_wifi_ip()
+    Web->>Web: get_wifi_ip()
     Web->>Web: await app.start_server(host, port, debug)
     Note over Web: host=0.0.0.0，port=80，debug=False
 ```
@@ -99,7 +99,7 @@ sequenceDiagram
 | 初始化 MQTT | `MqttManager(...)` | SSID／密碼與 Broker 由 main 指定 | client、連線旗標與連線 Event |
 | 主組裝 | `SensorSnapshot()` | 沒有硬體參照 | 感測 value、valid、quality、age、error |
 | 主組裝 | `LedController()`、`CommandService()` | RGB driver 與 controller 參照 | 唯一 LED owner 與共用命令入口 |
-| `web_server_task()` | Web 路由 | 讀 main 注入的共享參照 | HTML、SensorSnapshot、LED／MQTT API |
+| `web_server_task()` | Web 路由 | 讀main注入的共享參照 | SocketApp路由、Flash靜態檔串流與SensorSnapshot、LED／MQTT API |
 
 WiFi 失敗時包裝函式可能只回傳預設 profiles；拿到 SSID／密碼不保證已連網。MQTT 初始嘗試完成後才啟動 gather，因此 Web 啟動時間受初始化等待影響。Web 感測查詢只讀 Snapshot，不直接重新量測。
 
@@ -128,47 +128,46 @@ flowchart TB
 
 這些指定傳遞的是物件參照，不會複製硬體或快照；但 Web 只讀 `SensorSnapshot.snapshot()` 的資料副本，不直接呼叫 DHT／ADC。
 
-## 4. 第一次開啟網頁：Flash 檔案如何變成畫面？
+## 4. 第一次開啟網頁：Flash 檔案如何串流成畫面？
 
 ```mermaid
 sequenceDiagram
     participant Browser as 瀏覽器
-    participant App as Microdot app
+    participant App as SocketApp
     participant Route as web_server.index
-    participant RAM as HTML_PAGE
-    participant Flash as index.html 檔案
+    participant Response as Response.send_file
+    participant Flash as index.html檔案
     Browser->>App: GET / 或 GET /index.html
-    App->>Route: index(request) 或 index_html(request)
-    alt HTML_PAGE 是 None
-        Route->>Flash: load_html()，open 與 read
-        Flash-->>RAM: 完整 HTML 字串
-    else 已有 HTML_PAGE
-        Route->>RAM: 使用已載入字串
+    App->>Route: 派發Request
+    Route->>Response: send_file index.html
+    Response->>Flash: stat並以rb模式open
+    Flash-->>Response: 檔案物件與Content-Length
+    Response-->>App: text/html回應
+    loop 每次最多1024 bytes
+        App->>Flash: read 1024
+        Flash-->>App: chunk
+        App-->>Browser: writer.write與drain
     end
-    RAM-->>Route: HTML_PAGE
-    Route-->>App: Response(HTML_PAGE, headers)
-    App-->>Browser: text/html#59; charset=utf-8
-    Browser->>Browser: 解析 HTML、建立 DOM、套用 CSS
-    Browser->>Browser: 執行底部 script，updateData()
-    Browser->>Browser: setInterval(updateData, 1000)
+    App->>Flash: close
+    Browser->>Browser: 解析HTML、建立DOM、套用CSS
+    Browser->>Browser: 啟動各資料通道的非重疊輪詢
 ```
 
 | 步驟 | 程式與參數 | 來源與存放 |
 |---|---|---|
-| 事先載入 | `web_server_task()` 先呼叫 `load_html()` | 通常在首次 HTTP 前已讀取檔案 |
-| 讀檔 | `open('index.html', 'r', encoding='utf-8')` | 相對於裝置目前工作目錄，必須確保檔案可找到 |
-| 儲存 | `HTML_PAGE = f.read()` | ESP32 RAM 的模組全域字串；with 結束關閉檔案，不清除字串 |
-| 路由註冊 | `@app.route('/')`／`@app.route('/index.html')` | 匯入模組時將 URL 與 handler 登記於 app |
-| 請求派發 | Microdot 呼叫 `index(request)` | `request` 由框架解析 HTTP 產生，不是 JavaScript 直接傳 Python 物件 |
-| 回應建立 | `Response(HTML_PAGE, headers={...})` | 本文是已載入字串；header 指定 HTML／UTF-8 |
-| 瀏覽器解析 | HTML→DOM，CSS→樣式 | 建立 Browser 記憶體中的元素及初始 `--`／正常文字 |
-| 程式啟動 | `updateData(); setInterval(updateData, 1000);` | script 在 body 後端，前面的顯示節點已建立 |
+| 路由註冊 | `@app.route('/')`／`@app.route('/index.html')` | 匯入模組時把URL與handler登記於`SocketApp` |
+| 回應建立 | `Response.send_file('index.html', content_type='text/html; charset=utf-8')` | 只開啟Flash檔案並設定長度，不建立完整HTML字串 |
+| 分塊傳送 | `_write_response()`呼叫`read(1024)` | 每塊寫入Socket後`drain()`，完成或失敗都關閉檔案 |
+| 瀏覽器解析 | HTML→DOM，CSS→樣式 | 建立瀏覽器記憶體中的元素與初始文字 |
+| 程式啟動 | `pollSensorData()`、`pollMotionStatus()`、`pollLedStatus()` | 每個通道完成一筆後才安排下一筆 |
 
-頁面另外請求兩個本機資產：`/assets/uplot/1.6.32/uPlot.iife.min.js` 與 `/assets/uplot/1.6.32/uPlot.min.css`。`web_server.py` 使用固定路由與 `Response.send_file()` 串流回應，不把函式庫併入 `HTML_PAGE`；兩個資產使用長效快取，因此更新函式庫版本時必須同步修改 URL 版本目錄、路由與部署檔案。
+首頁不再使用`HTML_PAGE`或`f.read()`。這避免啟動時配置約31 KB字串，也避免回應時把同一字串再encode成另一份大型bytes。代價是每次首頁請求都會重新開啟Flash檔案，但RAM峰值只包含小型header與目前的1024-byte chunk。
+
+頁面另外請求兩個本機資產：`/assets/uplot/1.6.32/uPlot.iife.min.js`與`/assets/uplot/1.6.32/uPlot.min.css`。首頁與兩個資產都使用`Response.send_file()`串流；uPlot資產另使用長效快取。
 
 ### 4.1 uPlot 如何整合進 `index.html` 與 `web_server.py`
 
-本專案採「HTML 頁面與圖表函式庫分離部署」：`index.html` 只保留頁面結構、樣式與應用程式 JavaScript；uPlot 的 JavaScript／CSS 以固定版本檔案放在 `assets/`，再由 `web_server.py` 提供同源 HTTP 路由。這樣不需要 CDN、ESP32 不必在執行時連外下載函式庫，也不會把約 51 KB 的壓縮 JavaScript 複製進 `HTML_PAGE` 字串。
+本專案採「HTML頁面與圖表函式庫分離部署」：`index.html`保留頁面結構、樣式與應用JavaScript；uPlot JavaScript／CSS放在`assets/`並由同源路由提供。三個檔案都直接從Flash分塊傳送，不建立模組全域的大型字串，也不需要CDN。
 
 #### A. `index.html` 的載入順序
 
@@ -272,32 +271,31 @@ Y 軸則故意不採資料自動縮放：
 4. `window.resize` 事件呼叫 `resizeLightChart()`，依容器寬度執行 `setSize()`；不重新建立 uPlot，也不清除歷史資料。
 5. uPlot 載入失敗時只停用圖表，不會把感測文字輪詢或 LED／RFID／移動偵測流程改成依賴圖表。
 
-#### E. `web_server.py` 如何提供 uPlot 檔案
+#### E. `web_server.py` 如何提供 HTML 與 uPlot 檔案
 
-`web_server.py` 的 `load_html()` 只讀取根目錄 `index.html` 到 `HTML_PAGE`；uPlot 資產不在啟動時讀成 Python 字串。兩個固定路由使用 Microdot 的 `Response.send_file()`：
+首頁與uPlot資產共用`Response.send_file()`；首頁不設長效快取，版本化uPlot路徑則使用一年快取：
 
 ```python
+@app.route('/')
+async def index(request):
+    return Response.send_file(
+        'index.html',
+        content_type='text/html; charset=utf-8')
+
 @app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')
 async def uplot_javascript(request):
     return Response.send_file(
         'assets/uplot/1.6.32/uPlot.iife.min.js',
         content_type='application/javascript; charset=utf-8',
         max_age=31536000)
-
-@app.route('/assets/uplot/1.6.32/uPlot.min.css')
-async def uplot_stylesheet(request):
-    return Response.send_file(
-        'assets/uplot/1.6.32/uPlot.min.css',
-        content_type='text/css; charset=utf-8',
-        max_age=31536000)
 ```
 
 這裡有四個設計重點：
 
-1. **同源路徑：**HTML 使用相對根路徑，瀏覽器與 `/api/data` 使用同一個 ESP32 origin，不需要 CORS 或外部網路。
-2. **串流檔案：**`send_file()` 直接從檔案回應資產，不把壓縮 JavaScript／CSS 併入 `HTML_PAGE`；這降低 HTML 複製與啟動時的額外記憶體壓力。
-3. **正確 MIME type：**JavaScript 回 `application/javascript; charset=utf-8`，CSS 回 `text/css; charset=utf-8`，瀏覽器才會依資產用途解析。
-4. **長效快取與版本路徑：**`max_age=31536000` 允許瀏覽器長期快取；升級 uPlot 必須建立新的 `assets/uplot/<版本>/`、修改 HTML URL、增加對應路由並同步上傳，不能在相同 URL 直接替換內容後期待所有瀏覽器立即取得新檔。
+1. **同源路徑：**HTML、資產與JSON API使用同一個ESP32 origin，不需要CORS或外部網路。
+2. **分塊串流：**首頁、JavaScript與CSS都以1024-byte chunk傳送，不配置完整檔案大小的RAM字串。
+3. **正確MIME type：**HTML、JavaScript與CSS分別使用對應Content-Type。
+4. **長效快取與版本路徑：**只有版本化uPlot資產使用`max_age=31536000`；升級時必須建立新版本目錄並同步修改HTML與路由。
 
 #### F. ESP32 部署檢查表與故障定位
 
@@ -315,7 +313,7 @@ assets/uplot/1.6.32/LICENSE
 
 | 現象 | 優先檢查 |
 |---|---|
-| 頁面完全不是新版本 | ESP32 的 `HTML_PAGE` 是否因未重啟仍保留舊內容；瀏覽器是否需要強制重新整理 |
+| 頁面完全不是新版本 | 裝置上的`index.html`是否已更新；瀏覽器是否仍保留舊頁面或需要強制重新整理 |
 | 感測文字正常、圖表顯示「圖表元件載入失敗」 | uPlot JavaScript 路由、檔案路徑、檔案是否真的上傳；Network 是否取得 HTTP 200 |
 | 圖表有框但樣式異常 | `uPlot.min.css` 路由與 MIME type；瀏覽器是否被舊快取污染 |
 | 圖表只顯示兩點 | 確認使用目前 `renderLightChart()` 的 X 軸明確 `setScale()` 邏輯，而不是只呼叫 `setData(..., false)` |
@@ -325,11 +323,43 @@ assets/uplot/1.6.32/LICENSE
 
 `request` 在目前這些 handler 中沒有被讀取；URL 路由負責選函式。`0.0.0.0` 是伺服器綁定所有 IPv4 介面的地址，不是學生應在瀏覽器輸入的目的 IP；實際目的 IP 由 WiFi 取得並印在序列日誌。
 
-**HTML 的生命週期：**Flash 原始檔不因請求結束而刪除。RAM 中 `HTML_PAGE` 保持存在直到重新指定或程式／裝置重啟。上傳新 HTML 並不保證既有 RAM 快取或已開啟頁面會自動更新；目前沒有重新載入 API，通常需要重啟裝置並重新載入頁面。
+**HTML的生命週期：**Flash原始檔持續存在；每次`GET /`或`GET /index.html`都重新開檔並串流，請求結束即關閉，不在ESP32模組RAM保留頁面副本。已開啟的瀏覽器頁面仍不會自動替換，部署後應重新整理。
 
-讀檔失敗會將錯誤提示 HTML 存入 `HTML_PAGE`，而非維持 `None` 讓每個請求重讀。此時瀏覽器可能只看到替代錯誤頁，沒有原儀表板的 JavaScript 與按鈕。
+檔案不存在或無法開啟時，`send_file()`在序列埠記錄檔名與例外並回HTTP 404小型文字，不再嘗試配置替代的大型HTML。路由與Socket串流是本專案自有`SocketApp`／`Response`實作，不依賴Microdot。
 
-理論：路由是「方法／路徑→處理函式」的派發；HTTP Response 以 header 說明正文應如何解釋。Microdot 建構 request 和排程 handler 的框架內部細節依安裝版本而異，相關 API 見 [Microdot Core API](https://microdot.readthedocs.io/en/latest/api/microdot.html)。
+### 4.2 2026-10-21 記憶體事件紀錄與防回歸規則
+
+#### 已確認證據
+
+| 項目 | 數值／結果 | 能支持的結論 |
+|---|---:|---|
+| 首次ESP32錯誤要求配置 | 31,232 bytes | 失敗是大型連續RAM配置，不是單純找不到檔案 |
+| 加入網頁按鈕3之前的`mdy_05/index.html` | 31,308 bytes | 與錯誤配置量同一尺度；首次失敗時網頁按鈕3尚未加入 |
+| 加入網頁按鈕3後的`index.html` | 32,675 bytes | 頁面增加1,367 bytes，會惡化整檔載入，但不是首次事件的起因 |
+| 實體按鈕3回合的首頁Git blob | 與原基線相同 | 實體按鈕3沒有直接修改`index.html` |
+| 串流修正前的`web_server.py` Git blob | 與原基線相同 | 實體按鈕3沒有直接改壞Web讀檔程式 |
+| 受限檔案TCP smoke | 32,675 bytes、33次`read(1024)` | 修正後不需要整檔read；最後一次read用來取得EOF |
+
+**直接根因：**舊`load_html()`先以`f.read()`配置完整HTML字串，回應時又可能encode成另一份大型bytes；配置需要足夠大的連續heap。
+
+**觸發因素判定：**實體按鈕3新增`Button`／`Pin`物件、`button3_task` coroutine與效果狀態，而且這些物件在`web_server_task()`舊版呼叫`load_html()`之前已建立。它們可能使剩餘或連續heap低於約31 KB，讓既有缺陷首次浮現；但當時沒有保存`gc.mem_free()`與heap fragmentation資料，因此這是有程式順序支持的推論，不是唯一原因的實機量測證明。後續網頁按鈕3增加HTML大小，只會進一步降低舊設計的成功機率。
+
+#### 不可破壞的記憶體規則
+
+1. `/`、`/index.html`與大型靜態資產必須使用`Response.send_file()`；每次檔案`read`不得超過1024 bytes。
+2. 裝置端不得重新加入`HTML_PAGE`、無參數`read()`、`read_bytes()`，或先把完整靜態檔案組成`str`／`bytes`再回應。
+3. `test_index_stream_never_reads_the_whole_file`必須保留：測試檔案物件遇到整檔read會直接拋出`MemoryError`。
+4. HTML增長不得以提高單次配置量處理；應維持串流，並確認HTTP `Content-Length`與實際完整body一致。
+5. 新增硬體、driver或長駐task的ESP32實機驗收，應在初始化完成及Web開始服務前後記錄`gc.mem_free()`；只看總free heap仍不能證明存在31 KB連續區塊。
+6. 部署時`index.html`與`web_server.py`必須維持相容版本；不得只回復到會整檔載入的舊`web_server.py`。
+7. 多頁面同時連線會各自保有file、writer與chunk；目前尚無ESP32多客戶端壓力數據，不得把單連線smoke當成並發容量證明。
+
+#### 發佈檢查門檻
+
+- 桌面：完整Python測試、兩組前端測試、受限檔案TCP smoke與`git diff --check`通過。
+- 文件：任何靜態檔傳輸變更都同步更新本節與`SYSTEM_ARCHITECTURE.md`。
+- ESP32：序列埠不得再出現約31 KB的HTML配置失敗；`GET /`應完成HTTP 200。未觀察實機前只能標示桌面驗證。
+
 
 ## 5. 溫度／濕度：背景量測與網頁查詢是兩條流程
 
@@ -729,16 +759,16 @@ QoS0 是協定的 at-most-once 交付層級，不包含 PUBACK；本地 client �
 |---|---|---|---|---|
 | `index.html`／Python 原始檔 | ESP32 Flash 檔案系統 | 上傳部署 | 再上傳／刪檔才改變 | 斷電通常仍在；不是瀏覽器執行狀態 |
 | `config` 常數／topics | ESP32 模組記憶體，來源為檔案 | import 時執行指定 | 改值或重啟重新匯入 | 改 RAM 不自動寫回 Flash |
-| Microdot app 與 route mapping | ESP32 RAM | `Microdot()` 與 decorators | 結束／重建 app | 登記 handler，不等於已執行 HTTP |
-| `HTML_PAGE` | ESP32 模組 RAM | `load_html()` 的 read | 再次指定、重啟 | 關閉檔案不清它；通常不逐請求讀檔 |
+| `SocketApp`與route mapping | ESP32 RAM | 建立`SocketApp()`與decorators | 程式結束／重建app | 登記handler，不等於已執行HTTP |
+| `index.html`串流檔案物件 | 單次HTTP handler／Flash | `Response.send_file()`逐請求open | 傳送完成或錯誤時close | 不保留`HTML_PAGE`；每次最多讀1024-byte chunk |
 | DHT／ADC／LED 物件參照 | main、task 與 web 模組 | 初始化與注入 | 無參照／程式結束後可回收 | Web 只讀 Snapshot／controller snapshot |
 | `SensorSnapshot` | `services/sensor_snapshot.py` | 感測任務更新 last-good 與品質 | 重啟重建；欄位在 RAM | 包含 value、valid、quality、age、error |
 | LED controller state | `LedController` | CommandService 命令與 owner frame | 重啟重建；結果保留有界筆數 | desired／enabled／mode／applied 分離 |
 | GPIO 輸出電位 | MCU 硬體暫存器／腳位 | `LedController.run()` 呼叫 driver | 下一次寫入、重設、失去供電等 | 與 Python receipt 生命周期不同 |
-| Python HTTP request／Response／區域字串 | ESP32 handler／框架 | 每次請求解析、回應組裝 | 完成且無參照後可回收 | 沒有自動保存每筆歷史 |
+| Python HTTP request／Response／當前chunk | ESP32 handler | 每次請求解析、開檔與分塊回應 | 完成且無參照後可回收 | 首頁不建立完整RAM字串 |
 | 瀏覽器 Response／data | Browser JS | fetch 與 JSON 解析 | 協程結束且無參照後可回收 | 與 ESP32 物件不同 |
 | DOM 五個數值／status | Browser DOM | HTML 初值／textContent | 下次指定、重新載入／離開頁面 | 資料請求結束不會清文字 |
-| setInterval 計時器 | Browser 執行環境 | 登记 callback 與 1000ms | clearInterval 或頁面環境結束；目前未保存 ID | 刷新頁面會在新頁面重新登記 |
+| 各輪詢通道的setTimeout計時器 | Browser執行環境 | 前一筆完成後安排下一筆 | clearTimeout或頁面環境結束 | 不用setInterval累積重疊請求 |
 | `publish_event` 的旗標 | ESP32 RAM | 初始 clear，set 改變 | task 正常路徑 clear，或重建 | 不保存 payload／次數 |
 | `_connected_event`／`_connected` | MqttManager | 初始化後連線 callback 設定 | 與 publish_event 獨立 | 不代表每次發佈完成；斷線旗標處理仍有限 |
 | MQTT `message`／bytes／packet | task、manager、client 執行狀態 | 讀快取、組字串、encode、組包 | 下一輪覆寫或無參照後回收 | await 期間可能仍被持有 |

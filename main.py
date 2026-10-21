@@ -48,6 +48,7 @@ async def initialize_system():
     print("[Init] 初始化按鈕...")
     button1 = Button(config.BUTTON1_PIN)
     button2 = Button(config.BUTTON2_PIN)
+    button3 = Button(config.BUTTON3_PIN)
     
     print("[Init] 初始化感測器...")
     dht_sensor = Dht11Sensor()
@@ -110,7 +111,7 @@ async def initialize_system():
 
     print("[Init] 系統初始化完成\n")
     
-    return (rgb_led, button1, button2, dht_sensor, light_sensor,
+    return (rgb_led, button1, button2, button3, dht_sensor, light_sensor,
             mqtt_manager, rfid_reader, rfid_state, pir_sensor, speaker)
 
 
@@ -121,7 +122,7 @@ async def main():
     主程式：初始化系統並啟動所有協程
     """
     # 初始化系統
-    (rgb_led, button1, button2, dht_sensor, light_sensor,
+    (rgb_led, button1, button2, button3, dht_sensor, light_sensor,
      mqtt_manager, rfid_reader, rfid_state, pir_sensor, speaker) = await initialize_system()
     
     # 建立任務間通訊事件與共享資料契約
@@ -155,6 +156,7 @@ async def main():
             # 按鈕監聽任務
             tasks.button1_task(button1, command_service, publish_event),
             tasks.button2_task(button2, mqtt_manager, publish_event),
+            tasks.button3_task(button3, command_service),
 
             # 感測器讀取任務
             tasks.dht11_read_task(dht_sensor, sensor_snapshot),

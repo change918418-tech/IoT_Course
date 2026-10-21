@@ -54,7 +54,7 @@ flowchart LR
 2. 建立硬體與通訊物件。
 3. 將同一批物件傳給任務，並注入 `web_server.py` 的模組全域變數。
 4. 建立 LED owner、事件與 RAM 狀態快照。
-5. 以 `uasyncio.gather()` 同時執行 13 個應用協程。
+5. 以 `uasyncio.gather()` 同時執行 14 個應用協程。
 
 這是單一事件迴圈的協同多工系統，不是多執行緒或多程序架構。MQTT 函式庫可能另有自身的背景任務。
 
@@ -63,11 +63,11 @@ flowchart LR
 | 層級 | 檔案／符號 | 責任與介面 |
 |---|---|---|
 | 開機路徑 | `boot.py` | 調整 `sys.path`；沒有啟用 WebREPL。 |
-| 組裝／生命週期 | `main.py` | 建立硬體、WiFi、時間、MQTT、LED owner 與共享狀態；啟動 13 個協程；處理停止與例外清理。 |
+| 組裝／生命週期 | `main.py` | 建立硬體、WiFi、時間、MQTT、LED owner 與共享狀態；啟動 14 個協程；處理停止與例外清理。 |
 | 組態 | `config.py` | GPIO、輪詢週期、光照門檻、WiFi profiles、MQTT topics、裝置名稱與色碼。公開基線為 `config.example.py`。 |
 | 應用協調 | `tasks.py` | 按鈕、DHT、光感、PIR、RFID、OLED、喇叭、MQTT 發佈與訂閱任務。 |
 | 控制服務 | `services/command_service.py`、`services/led_controller.py` | 統一命令入口、request ID、驗證、有限佇列、AUTO／MANUAL 仲裁、結果快照與唯一 GPIO owner。 |
-| HTTP 介面 | `web_server.py` | Microdot 路由、HTML 載入、感測資料查詢、LED 命令、MQTT 發佈事件與狀態快照。 |
+| HTTP 介面 | `web_server.py` | 原生`SocketApp`路由、首頁／資產分塊串流、感測資料查詢、LED命令、MQTT發佈事件與狀態快照。 |
 | 使用者介面 | `index.html`、`assets/uplot/1.6.32/` | HTML／CSS／JavaScript 儀表板；uPlot 本機資產由 Web 路由提供。 |
 | WiFi／時間 | `communication/wifi.py` | 包裝已知 WiFi 連線、NTP 校時與目前時間字串。 |
 | MQTT 轉接器 | `communication/mqtt_client.py` | 包裝 `mqtt_as.MQTTClient`，提供連線、等待、發佈、訂閱與回呼入口。 |
@@ -158,6 +158,7 @@ flowchart LR
 | RGB LED | R=37、G=35、B=33 | 3-bit 顏色輸出；由 `LedController` 唯一寫入。 |
 | 按鈕 1 | GPIO 17 | `Pin.IN`、`PULL_UP`；按下提交 LED `cycle` 命令。 |
 | 按鈕 2 | GPIO 21 | `Pin.IN`、`PULL_UP`；按下設定 MQTT 發佈事件。 |
+| 按鈕 3 | GPIO 16 | `Pin.IN`、`PULL_UP`；按下提交 LED `green_flash_alert` 命令。 |
 | DHT11 | GPIO 18 | 溫度／濕度量測與 RAM 快取。 |
 | TEMT 光感測器 | ADC GPIO 8 | ADC 原始值 0～4095；更新 `SensorSnapshot` 並提交低光命令。 |
 | PIR | GPIO 4 | 高電位表示移動；低到高時觸發音樂事件。 |
@@ -184,8 +185,9 @@ RGB 色碼：
 
 ```text
 LIGHT_ALERT_ENABLED = True
-LIGHT_ALERT_TRIGGER_ADC = 1000
-LIGHT_ALERT_RESET_ADC = 1100
+LIGHT_DARK_WHEN_HIGH = True
+LIGHT_ALERT_TRIGGER_ADC = 2000
+LIGHT_ALERT_RESET_ADC = 1500
 LIGHT_ALERT_BLINK_COUNT = 5
 LIGHT_ALERT_ON_MS = 300
 LIGHT_ALERT_OFF_MS = 300
@@ -195,9 +197,9 @@ LIGHT_POLL_INTERVAL_MS = 50
 目前 `light_sensor_task()` 的控制規則：
 
 1. 只有 `LIGHT_ALERT_ENABLED` 且 LED 不 busy 時才產生低光命令。
-2. ADC `< 1000` 且已 armed 時，提交 `low_light_alert`。
-3. ADC `>= 1100` 時重新 armed。
-4. 1000～1099 之間維持既有 armed 狀態。
+2. ADC `> 2000` 且已 armed 時，提交 `low_light_alert`。
+3. ADC `<= 1500` 時重新 armed。
+4. 1501～2000 之間維持既有 armed 狀態。
 5. 警示期間由 `LedController` 保存原本的 desired／enabled 狀態，完成後還原。
 6. 警示完成前不接受一般 LED 命令。
 
@@ -209,7 +211,7 @@ OLED 腳位、尺寸與字型路徑目前直接寫在 `hardware/display.py`；�
 
 1. 載入 `config`、硬體、通訊、任務與 Web 模組。必要函式庫缺失時，可能在 `initialize_system()` 前就失敗。
 2. `uasyncio.run(main())` 建立主事件迴圈。
-3. `initialize_system()` 建立 RGB LED、兩個按鈕、DHT11 與 ADC 光感測器。
+3. `initialize_system()` 建立 RGB LED、三個按鈕、DHT11 與 ADC 光感測器。
 4. DHT11 先做一次量測。
 5. 嘗試建立 RFID；失敗時留下 `init_error` 並繼續。
 6. 透過 `connect_wifi()` 連線到已知 WiFi；失敗包裝層可能仍回傳第一組設定，這不代表實際已連線。
@@ -218,7 +220,7 @@ OLED 腳位、尺寸與字型路徑目前直接寫在 `hardware/display.py`；�
 9. 嘗試建立 PIR 與喇叭；失敗時設定為 `None`，對應任務會跳過。
 10. 建立 `publish_event`、`motion_event`、`SensorSnapshot`、`LedController`、`CommandService` 與 `motion_state`。
 11. 將共享物件注入 `web_server.py` 的模組全域變數。
-12. 以 `uasyncio.gather()` 啟動 13 個應用協程。
+12. 以 `uasyncio.gather()` 啟動 14 個應用協程。
 13. 正常流程持續運行；Web Server、背景任務或 MQTT 函式庫維持事件迴圈。
 14. 例外時要求 LED owner 停止、等待 LED 安全關閉，並嘗試斷開 MQTT；喇叭在 `finally` 釋放 PWM。
 
@@ -232,6 +234,7 @@ WiFi、NTP 與 DHT11 的底層操作可能是同步呼叫，會短暫占用協�
 |---|---|---|---|
 | `button1_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 1 | 透過 `CommandService` 提交 LED `cycle` 命令。 |
 | `button2_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 2 | `publish_event.set()`。 |
+| `button3_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 3 | 空閒時提交 `green_flash_alert`；忙碌按壓只消耗、不排隊。 |
 | `dht11_read_task` | 每 2 秒 | DHT11 | 更新 `SensorSnapshot`；失敗保留 last-good 並標示 quality／error。 |
 | `light_sensor_task` | 每 50 ms | ADC | 更新 `SensorSnapshot`，依雙門檻提交 `low_light_alert`。 |
 | `led_controller.run()` | 每 20 ms frame | 有界 LED 命令佇列 | 唯一寫入 RGB LED；執行 AUTO／MANUAL 仲裁與閃爍效果。 |
@@ -277,6 +280,7 @@ TEMT ADC
 
 ```text
 按鈕 1 ─┐
+按鈕 3 ─┤
 Web API ─┼→ CommandService → LedController → 有界命令佇列 → RGB GPIO
 光感 ───┤
 MQTT ───┘
@@ -423,20 +427,21 @@ client 設定 subs_cb = MqttManager.on_message
 
 | 方法 | 路徑 | 目前行為 |
 |---|---|---|
-| GET | `/` | 傳回 `index.html`。 |
-| GET | `/index.html` | 傳回 `index.html`。 |
+| GET | `/` | 從Flash開啟`index.html`，每次最多1024 bytes分塊傳送，不在RAM保留完整頁面。 |
+| GET | `/index.html` | 與`/`使用相同的`Response.send_file()`串流。 |
 | GET | `/assets/uplot/1.6.32/uPlot.iife.min.js` | 以 `Response.send_file()` 串流固定版本的 uPlot JavaScript；長效快取。 |
 | GET | `/assets/uplot/1.6.32/uPlot.min.css` | 以 `Response.send_file()` 回傳固定版本的 uPlot CSS；長效快取。 |
 | GET | `/api/data` | 回傳 `temp`、`humidity`、`light`、`light_thresholds`、`status`、RFID、PIR／音樂狀態與 LED snapshot；`light_thresholds`來自`config.py`。 |
 | GET | `/api/motion/status` | 只回傳PIR／喇叭RAM snapshot；不讀取DHT、ADC、SPI或GPIO；設定`Cache-Control: no-store`，供網頁獨立輪詢移動狀態。 |
 | POST | `/api/led/toggle` | 提交 LED `cycle` 命令；接受時回 HTTP 202，busy／queue full／stopped 依原因回 409／429／503。 |
-| GET | `/api/led/status` | 只回傳 LED RAM snapshot；不操作 ADC、DHT、SPI 或 GPIO；設定 `Cache-Control: no-store`。 |
+| POST | `/api/led/commands` | 提交通用LED命令；網頁按鈕3固定提交`green_flash_alert`，接受時回HTTP 202。 |
+| GET | `/api/led/status` | 只回傳 LED RAM snapshot，包含`alert_active`與`active_effect`；不操作 ADC、DHT、SPI 或 GPIO；設定 `Cache-Control: no-store`。 |
 | GET | `/api/led/commands/<id>` | 查詢有限結果歷史；過期或不存在時回 404。 |
 | POST | `/api/publish` | 設定 MQTT 發佈事件；連線可用時回 `202` 與 `status: accepted`，不等待 MQTT 發佈完成。 |
 | GET | `/api/publish/status` | 回傳最近一次發佈的 `idle`、`accepted`、`publishing`、`published`、`failed` 或 `unavailable` 狀態；設定 `Cache-Control: no-store`。 |
 | GET | `/api/status` | 目前固定回傳 `status: ok` 與 `System running`，不代表所有服務健康。 |
 
-目前沒有認證、HTTPS、WebSocket或SSE。前端以`/api/data`取得溫濕度、光照與RFID，另以`/api/motion/status`每1000 ms取得PIR／喇叭RAM快照，LED則使用快速`/api/led/status`路徑。HTTP API在同網段內可直接被呼叫，後端仍是控制權威，前端提示不能取代後端busy／輸入檢查。
+目前沒有認證、HTTPS、WebSocket或SSE。前端以`/api/data`取得溫濕度、光照與RFID，另以`/api/motion/status`每1000 ms取得PIR／喇叭RAM快照，LED按鈕1與按鈕3共用快速`/api/led/status`狀態。HTTP API在同網段內可直接被呼叫，後端仍是控制權威，前端提示不能取代後端busy／輸入檢查。
 
 ### uPlot 靜態資產與前端圖表整合
 
@@ -495,27 +500,35 @@ X 軸也設為 `auto: false`，並提供 identity `range` 函式；每次 `rende
 
 `web_server.py` 的 `api_data()` 讀取 `config.LIGHT_ALERT_TRIGGER_ADC` 與 `config.LIGHT_ALERT_RESET_ADC`，放入同一個 JSON 的`light_thresholds`物件；`index.html`在`updateData()`中先呼叫`updateLightThresholds(data.light_thresholds)`，再更新圖表。若只修改裝置端`config.py`，不需要修改HTML，下一次API成功回應會更新紅線位置；若回應暫時缺少欄位，前端保留最後一次有效門檻。
 
-#### 4. `web_server.py` 的靜態資產路由
+#### 4. `web_server.py` 的靜態檔案路由
 
-`web_server_task()` 啟動時呼叫 `load_html()`，只將 `index.html` 讀入 `HTML_PAGE`。uPlot 檔案不併入這個 HTML 字串，而由兩個獨立路由使用 `Response.send_file()` 回應：
+首頁與uPlot資產都使用`Response.send_file()`。`web_server_task()`不再呼叫`load_html()`，也沒有`HTML_PAGE`全域字串：
 
 ```python
+@app.route('/')
+async def index(request):
+    return Response.send_file(
+        'index.html',
+        content_type='text/html; charset=utf-8')
+
 @app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')
 async def uplot_javascript(request):
     return Response.send_file(
         'assets/uplot/1.6.32/uPlot.iife.min.js',
         content_type='application/javascript; charset=utf-8',
         max_age=31536000)
-
-@app.route('/assets/uplot/1.6.32/uPlot.min.css')
-async def uplot_stylesheet(request):
-    return Response.send_file(
-        'assets/uplot/1.6.32/uPlot.min.css',
-        content_type='text/css; charset=utf-8',
-        max_age=31536000)
 ```
 
-`send_file()` 的路徑是 ESP32 檔案系統上的相對路徑；因此 `assets/uplot/1.6.32/` 必須與 `web_server.py` 的執行工作目錄及部署結構相符。JavaScript／CSS 使用各自的 MIME type，`max_age=31536000` 表示瀏覽器可以長期快取。版本升級時必須同時修改 HTML 引用、Python 路由與裝置檔案目錄；只替換同一路徑的檔案，可能因快取讓部分瀏覽器仍使用舊版本。
+`_write_response()`對檔案物件重複`read(1024)`、`writer.write()`與`drain()`，並在完成或錯誤時close。這避免配置約31 KB的完整HTML字串及其UTF-8 bytes副本。所有路徑都是ESP32檔案系統相對路徑；檔案無法開啟時記錄例外並回404。uPlot版本化資產使用長效快取，首頁不設定長效快取。
+
+**靜態檔記憶體不變量：**
+
+- 首次事件在實體按鈕3加入後出現，但當時`index.html`與`web_server.py`的Git blob都未改；第三個`Button`／`Pin`與coroutine可能是降低heap餘裕的觸發因素，不是直接根因。
+- 錯誤要求配置31,232 bytes；當時首頁31,308 bytes。直接根因是整檔`f.read()`與後續encode需要大型連續heap。
+- 首頁後來增至32,675 bytes，但串流路徑仍固定使用1024-byte chunk；不得依頁面大小提高chunk或恢復整檔快取。
+- `tests/test_socket_web_server.py::test_index_stream_never_reads_the_whole_file`以整檔read即拋`MemoryError`的檔案物件守住此契約。
+- 新增長駐硬體或task時，ESP32驗收應記錄初始化完成及Web啟動前後的`gc.mem_free()`；目前沒有首次事件的heap量測，不能宣稱第三按鈕是唯一原因。
+
 
 #### 5. 部署與錯誤邊界
 
@@ -616,7 +629,7 @@ assets/uplot/1.6.32/LICENSE
 
 1. 確認開發板型號、GPIO、ADC、電源、共地與周邊接線。
 2. 上傳後逐一確認必要模組、`index.html`、`assets/uplot/1.6.32/uPlot.iife.min.js`、`assets/uplot/1.6.32/uPlot.min.css`、字型與驅動可以讀取／import。
-3. 單獨確認 RGB LED、兩個按鈕、DHT11、ADC、PIR、喇叭、OLED 與 RFID。
+3. 單獨確認 RGB LED、三個按鈕、DHT11、ADC、PIR、喇叭、OLED 與 RFID。
 4. 確認 WiFi IP、NTP 校時與同網段瀏覽器可連接 HTTP 80。
 5. 確認 `/api/data`、`/api/led/status`、LED 命令與命令結果查詢。
 6. 以外部 MQTT client 驗證溫濕度 payload 與 `led:4`／`led=4` 入站指令；目前桌面測試已確認 adapter 派送，但尚未宣稱真 Broker／ESP32 實機通過。

@@ -54,16 +54,23 @@ const context = vm.createContext({
     console: {log() {}, error() {}}, alert() {}
 });
 const settle = () => new Promise(setImmediate);
-const response = value => ({ok: true, json: async () => value});
+const response = (value, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => value
+});
 (async () => {
     vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
     assert.equal(requests.filter(r => r.url === '/api/data').length, 1);
     const join = context.updateLedStatus();
     assert.equal(requests.filter(r => r.url === '/api/led/status').length, 1);
     // A slow sensor call does not prevent the independent warning snapshot.
-    requests.find(r => r.url === '/api/led/status').gate.resolve(response({available: true, alert_active: true}));
+    requests.find(r => r.url === '/api/led/status').gate.resolve(response({
+        available: true, alert_active: true, active_effect: 'low_light_alert'
+    }));
     await join;
     assert.equal(elements.ledButton.disabled, true);
+    assert.equal(elements.greenFlashButton.disabled, true);
     assert.match(elements.ledAlertStatus.textContent, /紅燈警示中/);
     // An old sensor snapshot must never re-enable the LED button.
     requests.find(r => r.url === '/api/data').gate.resolve(response({led: {available: true, alert_active: false}}));
@@ -79,13 +86,16 @@ const response = value => ({ok: true, json: async () => value});
     assert.equal(slowRequest.options.signal.aborted, true);
     assert.equal(elements.ledButton.disabled, true);
     assert.match(elements.ledAlertStatus.textContent, /紅燈警示中/);
-    slowRequest.gate.resolve(response({available: true, alert_active: true}));
+    slowRequest.gate.resolve(response({
+        available: true, alert_active: true, active_effect: 'low_light_alert'
+    }));
     await settle();
     assert.match(elements.ledAlertStatus.textContent, /紅燈警示中/); // Late response ignored.
     const recovery = context.updateLedStatus();
     requests.filter(r => r.url === '/api/led/status').at(-1).gate.resolve(response({available: true, alert_active: false}));
     await recovery;
     assert.equal(elements.ledButton.disabled, false);
+    assert.equal(elements.greenFlashButton.disabled, false);
     assert.equal(elements.ledAlertStatus.textContent, 'LED 可操作');
     // A single failure preserves a recently confirmed operable state.
     const transient = context.updateLedStatus();
@@ -135,6 +145,7 @@ const response = value => ({ok: true, json: async () => value});
     requests.filter(r => r.url === '/api/led/status').at(-1).gate.resolve(response({available:true, alert_active:false}));
     await same;
     assert.equal(elements.ledButton.disabled, false);
+    assert.equal(elements.greenFlashButton.disabled, false);
     assert.equal(context.getLedDiagnostics().failureCount, 0);
     // Manual refresh while a sensor request is active cannot overlap it.
     const sensor = context.updateData();
@@ -142,5 +153,53 @@ const response = value => ({ok: true, json: async () => value});
     assert.equal(requests.filter(r => r.url === '/api/data').length, 3);
     requests.filter(r => r.url === '/api/data').at(-1).gate.resolve(response({}));
     await sensor;
+    context.showLedStatus({
+        available: true,
+        alert_active: true,
+        active_effect: 'green_flash_alert'
+    });
+    assert.equal(elements.ledButton.disabled, true);
+    assert.equal(elements.greenFlashButton.disabled, true);
+    assert.match(elements.ledAlertStatus.textContent, /綠燈效果中/);
+    context.showLedStatus({
+        available: true,
+        alert_active: false,
+        active_effect: null
+    });
+
+    const greenRun = context.flashGreen();
+    const greenSubmit = requests.at(-1);
+    assert.equal(greenSubmit.url, '/api/led/commands');
+    assert.equal(greenSubmit.options.method, 'POST');
+    assert.deepEqual(
+        JSON.parse(greenSubmit.options.body),
+        {kind: 'green_flash_alert'});
+    assert.equal(elements.ledButton.disabled, true);
+    assert.equal(elements.greenFlashButton.disabled, true);
+    greenSubmit.gate.resolve(response({
+        id: 303,
+        request_id: 303,
+        status: 'accepted'
+    }, 202));
+    await settle();
+    const greenResult = requests.at(-1);
+    assert.equal(greenResult.url, '/api/led/commands/303');
+    greenResult.gate.resolve(response({
+        id: 303,
+        request_id: 303,
+        status: 'executed'
+    }));
+    await settle();
+    const greenRefresh = requests.at(-1);
+    assert.equal(greenRefresh.url, '/api/led/status');
+    greenRefresh.gate.resolve(response({
+        available: true,
+        alert_active: false,
+        active_effect: null
+    }));
+    await greenRun;
+    assert.equal(elements.ledButton.disabled, false);
+    assert.equal(elements.greenFlashButton.disabled, false);
+    assert.equal(elements.ledCommandStatus.textContent, '命令 303 已執行');
     console.log('Independent LED polling, single flight, stale response and timeout: PASS');
 })().catch(error => {console.error(error); process.exitCode = 1;});

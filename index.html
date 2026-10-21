@@ -322,6 +322,7 @@
         <div class="buttons">
             <button id="ledButton" class="btn-primary" onclick="toggleLED()" disabled>按鈕 1: 切換 LED</button>
             <button class="btn-primary" onclick="publishData()">按鈕 2: 發布數據</button>
+            <button id="greenFlashButton" class="btn-primary" onclick="flashGreen()" disabled>按鈕 3: 綠閃三次</button>
         </div>
 
         <footer>
@@ -535,6 +536,11 @@
             }
         }
 
+        function setLedButtonsDisabled(disabled) {
+            document.getElementById('ledButton').disabled = disabled;
+            document.getElementById('greenFlashButton').disabled = disabled;
+        }
+
         function renderLedStatus() {
             const now = statusNow();
             const fresh = lastLedSuccessAt !== null && now - lastLedSuccessAt < STATUS_VALID_MS;
@@ -543,11 +549,20 @@
             renderLedFlashHistory(led);
             const alertTotal = Number.isFinite(Number(led?.alert_flash_total))
                 ? Number(led.alert_flash_total) : 5;
-            document.getElementById('ledButton').disabled = ledRequestPending || !fresh || !led?.available || Boolean(led?.alert_active);
-            document.getElementById('ledAlertStatus').textContent = !fresh
-                ? (connected ? 'LED 狀態更新異常，暫停操作' : '連線狀態無法確認，暫停操作')
-                : (led.alert_active ? '紅燈警示中：閃爍 ' + alertTotal + ' 次，改色操作暫停且不排隊'
-                    : (led.available ? 'LED 可操作' : 'LED 尚未就緒'));
+            setLedButtonsDisabled(ledRequestPending || !fresh || !led?.available || Boolean(led?.alert_active));
+            let statusText;
+            if (!fresh) {
+                statusText = connected ? 'LED 狀態更新異常，暫停操作' : '連線狀態無法確認，暫停操作';
+            } else if (led.active_effect === 'green_flash_alert') {
+                statusText = '綠燈效果中：閃爍 3 次，LED 操作暫停且不排隊';
+            } else if (led.alert_active) {
+                statusText = led.active_effect && led.active_effect !== 'low_light_alert'
+                    ? 'LED 效果執行中：操作暫停且不排隊'
+                    : '紅燈警示中：閃爍 ' + alertTotal + ' 次，LED 操作暫停且不排隊';
+            } else {
+                statusText = led.available ? 'LED 可操作' : 'LED 尚未就緒';
+            }
+            document.getElementById('ledAlertStatus').textContent = statusText;
         }
 
         function monitorLedFreshness() {
@@ -719,39 +734,38 @@
                 sensorUpdatePending = false;
             }
         }
-        
-        // 切換 LED
-        async function toggleLED() {
-            if (document.getElementById('ledButton').disabled) return;
+        // 共用 LED 命令受理、結果查詢與狀態刷新
+        async function runLedCommand(url, options, maxAttempts, pollDelayMs) {
             ledRequestPending = true;
-            document.getElementById('ledButton').disabled = true;
+            setLedButtonsDisabled(true);
             try {
-                const response = await fetch('/api/led/toggle', { method: 'POST' });
+                const response = await fetch(url, options);
                 const receipt = await response.json();
                 if (response.status !== 202) {
                     document.getElementById('ledCommandStatus').textContent = '操作未受理：' + (receipt.reason || response.status);
                     if (response.status === 409) showLedStatus({available: true, alert_active: true});
                     return;
                 }
-                document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 已受理，等待執行';
-                for (let attempt = 0; attempt < 15; attempt++) {
-                    const check = await fetch('/api/led/commands/' + receipt.id);
+                const commandId = receipt.id ?? receipt.request_id;
+                document.getElementById('ledCommandStatus').textContent = '命令 ' + commandId + ' 已受理，等待執行';
+                for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                    const check = await fetch('/api/led/commands/' + commandId);
                     if (!check.ok) {
-                        document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 結果未知或紀錄已過期';
+                        document.getElementById('ledCommandStatus').textContent = '命令 ' + commandId + ' 結果未知或紀錄已過期';
                         return;
                     }
                     const result = await check.json();
                     if (result.status === 'executed') {
-                        document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 已執行';
+                        document.getElementById('ledCommandStatus').textContent = '命令 ' + commandId + ' 已執行';
                         return;
                     }
                     if (['rejected', 'failed', 'cancelled'].includes(result.status)) {
-                        document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 未完成：' + result.status + ' / ' + result.reason;
+                        document.getElementById('ledCommandStatus').textContent = '命令 ' + commandId + ' 未完成：' + result.status + ' / ' + result.reason;
                         return;
                     }
-                    await new Promise(resolve => setTimeout(resolve, 50));
+                    await new Promise(resolve => setTimeout(resolve, pollDelayMs));
                 }
-                document.getElementById('ledCommandStatus').textContent = '命令 ' + receipt.id + ' 尚未取得完成結果，請查詢命令狀態';
+                document.getElementById('ledCommandStatus').textContent = '命令 ' + commandId + ' 尚未取得完成結果，請查詢命令狀態';
             } catch (error) {
                 console.error('LED 控制失敗:', error);
                 document.getElementById('ledCommandStatus').textContent = '連接中斷，LED 操作結果未知';
@@ -759,6 +773,20 @@
                 ledRequestPending = false;
                 await updateLedStatus();
             }
+        }
+
+        async function toggleLED() {
+            if (document.getElementById('ledButton').disabled) return;
+            await runLedCommand('/api/led/toggle', {method: 'POST'}, 15, 50);
+        }
+
+        async function flashGreen() {
+            if (document.getElementById('greenFlashButton').disabled) return;
+            await runLedCommand('/api/led/commands', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({kind: 'green_flash_alert'})
+            }, 12, 200);
         }
         
         // 發布數據

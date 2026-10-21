@@ -2,12 +2,12 @@
 
 這份講義不是要證明「這一定是最好的設計」，而是先把目前遇到的問題、目前採用的解法，以及解法背後的理由講清楚。使用者目前回報實機操作狀況良好；這是目前已觀察到的結果，不代表所有時序、網路、硬體、壓力與故障情境都已完整測試。
 
-本講義的範圍是三種需求共同使用一個 RGB LED：
+本講義的範圍是四種需求共同使用一個 RGB LED：
 
-1. 實體按鈕要求 LED 換下一個顏色。
-2. 網頁按鈕要求 LED 換下一個顏色。
+1. 實體按鈕 1 要求 LED 換下一個顏色。
+2. 網頁按鈕 1 要求 LED 換下一個顏色。
 3. 光線太暗時，系統要求 LED 紅色閃爍五次，完成後回到原本狀態。
-
+4. 實體或網頁按鈕 3 要求 LED 綠色閃爍三次，完成後回到原本狀態。
 MQTT 的 `set_color` 現在也經由 `MqttManager` 的同步 callback bridge 送入 `CommandService`，再交給同一個 `LedController`；本文件只記錄桌面 fake MQTT／fake GPIO 已驗證的 adapter 路徑，未宣稱真 Broker 與 ESP32 實機端到端通過。
 
 ## 閱讀路線：先用生活比喻，再看案例與程式
@@ -16,23 +16,24 @@ MQTT 的 `set_color` 現在也經由 `MqttManager` 的同步 callback bridge 送
 
 先記住一句話：
 
-> **三個來源可以提出要求，但一個 LED 同一時間只能有一個真正的操作者。**
+> **所有來源都可以提出要求，但一個 LED 同一時間只能有一個真正的操作者。**
 
 所有案例預設系統已完成初始化、服務正常、佇列未滿。為方便比較，先假設 LED 已由先前操作選成藍色 1 且亮燈；這不是開機預設，實際 owner 初始色碼為白色 7。案例命令 ID 用 10、11 表示，僅為示範，裝置 ID 依實際 `submit` 次數遞增。圖中的先後順序是推演條件，不是保證每次排程相同。
 
 ## 0. 先說我們到底解決了什麼問題
 
-### 0.1 一盞燈，三種要求
+### 0.1 一盞燈，四種要求
 
 把 LED 想成教室門口的一盞「任務燈」。它只有三個顏色開關：紅、綠、藍；硬體在同一個瞬間只能呈現一個輸出。
 
-現在有三個提出要求的人：
+現在有四個提出要求的人：
 
 | 提出要求的人 | 他想做什麼 | 這是短動作還是暫時效果？ |
 |---|---|---|
-| 實體按鈕 | 換到下一個顏色 | 短動作 |
-| 網頁按鈕 | 換到下一個顏色 | 短動作 |
+| 實體按鈕 1 | 換到下一個顏色 | 短動作 |
+| 網頁按鈕 1 | 換到下一個顏色 | 短動作 |
 | 光照感測器 | 太暗時紅閃五次 | 暫時效果，結束後要恢復 |
+| 實體／網頁按鈕 3 | 綠閃三次 | 暫時效果，結束後要恢復 |
 
 問題不是「LED 不會亮」，而是**多人同時要使用同一個東西**。例如：
 
@@ -89,12 +90,12 @@ MQTT 的 `set_color` 現在也經由 `MqttManager` 的同步 callback bridge 送
 5. 只有一位 LED 工作員 `LedController.run()` 依序處理待辦單。
 6. 工作員最後才使用工具 `RgbLed.write()` 寫入 GPIO。
 
-紅閃有一條特別規則：
+紅閃與綠閃共用一條效果規則：
 
-- 光感要求紅閃時，受理窗口立刻把 `busy`／`reserved` 設為真。
-- 尚未執行的普通換色要求被標記為 `rejected / alert_started`，不會在紅閃後偷偷補做。
-- 紅閃開始時，工作員記住原本的正常顏色。
-- 五次紅閃完成後，工作員恢復那個正常顏色。
+- 任一效果被接受時，受理窗口立刻把 `busy`／`reserved` 設為真。
+- 尚未執行的普通換色要求被標記為 `rejected / alert_started`，不會在效果後偷偷補做。
+- 效果開始時，工作員記住原本的正常顏色與亮滅狀態。
+- 紅閃五次或綠閃三次完成後，工作員恢復原本狀態。
 - 只有恢復輸出完成後，才解除 `busy`。
 
 這樣做的重點不是「讓所有要求都成功」，而是讓每一次接受或拒絕都有**可解釋的理由**，讓 LED 不會被多個流程同時改寫。
@@ -105,7 +106,7 @@ MQTT 的 `set_color` 現在也經由 `MqttManager` 的同步 callback bridge 送
 
 - 一個 LED 在同一瞬間只有一組 GPIO 輸出。
 - 多個要求可能在不同時間抵達。
-- 紅閃需要持續一段時間，不是一次函式呼叫就完成。
+- 暫時閃爍效果需要持續一段時間，不是一次函式呼叫就完成。
 - 感測器、按鈕、網路與瀏覽器都可能延遲或失敗。
 - 使用者需要知道要求是「還沒接」、「已接但未做」、「已做完」還是「被拒絕」。
 
@@ -113,10 +114,10 @@ MQTT 的 `set_color` 現在也經由 `MqttManager` 的同步 callback bridge 送
 
 ```mermaid
 flowchart TD
-    Root[根問題：三種需求共用一個三色 LED] --> Physical[物理限制：同一瞬間只有一組 GPIO 輸出]
+    Root[根問題：四種需求共用一個三色 LED] --> Physical[物理限制：同一瞬間只有一組 GPIO 輸出]
     Root --> Time[時間限制：受理與真正執行可能不同時刻]
-    Root --> Conflict[衝突限制：紅閃與換色可能接近同時到達]
-    Root --> Effect[效果限制：紅閃要持續亮滅並最後恢復]
+    Root --> Conflict[衝突限制：效果與換色可能接近同時到達]
+    Root --> Effect[效果限制：亮滅結束後必須恢復]
     Root --> Observe[觀察限制：網頁畫面不等於 GPIO 現況]
     Root --> Input[輸入限制：按鈕會抖動，光線會在門檻附近變動]
     Physical --> Owner[單一 LED owner]
@@ -124,10 +125,10 @@ flowchart TD
     Time --> Admission[submit 受理窗口]
     Time --> Receipt[receipt 狀態與命令 ID]
     Time --> Queue[有界 FIFO 待辦清單]
-    Conflict --> Reserve[警示受理立即 reserved 或 busy]
+    Conflict --> Reserve[效果受理立即 reserved 或 busy]
     Conflict --> Reject[拒絕不適合的要求並留下 reason]
     Effect --> Saved[保存正常顏色與亮滅狀態]
-    Effect --> StateMachine[紅閃狀態機與 ticks_ms]
+    Effect --> StateMachine[共用效果狀態機與 ticks_ms]
     Observe --> Snapshot[RAM 快照與 no-store API]
     Observe --> Freshness[單筆在途與有效期限]
     Observe --> Backend[後端檢查才是控制權威]
@@ -169,13 +170,13 @@ flowchart TD
 
 **解決什麼：**不讓要求無限堆積，也不靜默遺失；系統能回覆 `queue_full`。
 
-### E. 紅閃是特別事件 → 預約與拒絕政策
+### E. 閃爍是特別事件 → 預約與拒絕政策
 
-**比喻：**火警演習一開始，教室先停止一般活動；不能說「我剛剛排隊，所以演習中也要換燈」。
+**比喻：**表演一開始，教室先停止一般活動；不能說「我剛剛排隊，所以表演中也要換燈」。
 
-**程式：**`low_light_alert` 被 `submit()` 接受時就設定 `_reserved = True`，並清除尚未執行的普通命令。
+**程式：**`low_light_alert` 或 `green_flash_alert` 被 `submit()` 接受時就設定 `_reserved = True`，並清除尚未執行的普通命令。
 
-**解決什麼：**關閉「紅閃已被接受但 owner 還沒排到它」的時間縫隙。這是目前避免競爭錯亂的關鍵。
+**解決什麼：**關閉「效果已被接受但 owner 還沒排到它」的時間縫隙；紅閃與綠閃採先接受者完成、後來者以 `busy` 拒絕。
 
 ### F. 正常狀態與暫時效果分開
 
@@ -184,18 +185,18 @@ flowchart TD
 **程式：**
 
 - 正常狀態：`_desired_color`、`_enabled`。
-- 暫時效果：`_effect`，保存亮滅階段、完成次數與原本狀態。
-- 實際輸出：`RgbLed.write()` 當下寫出的紅色或全滅。
+- 暫時效果：`_effect`，保存顏色、亮滅階段、完成次數與原本狀態。
+- 實際輸出：`RgbLed.write()` 當下寫出的紅色、綠色或全滅。
 
-**解決什麼：**紅色 4 只是紅閃期間的暫時輸出，不會破壞原本藍色 1 的正常狀態。
+**解決什麼：**紅色 4 與綠色 2 都只是效果期間的暫時輸出，不會破壞正常狀態。
 
-### G. 紅閃需要時間 → 狀態機與 frame
+### G. 閃爍需要時間 → 狀態機與 frame
 
-**比喻：**每 20 ms 回來看一次手錶，不代表每次看手錶就切換紅燈；只有該亮 300 ms 到了，才進入下一階段。
+**比喻：**每 20 ms 回來看一次手錶，不代表每次看手錶就切換 LED；只有該亮 300 ms 到了，才進入下一階段。
 
-**程式：**owner 每 20 ms 執行 `_step()`，用 `ticks_ms()`／`ticks_diff()` 判斷目前亮或滅的階段是否到期；每輪最多推進一個階段。
+**程式：**owner 每 20 ms 執行 `_step()`，用 `ticks_ms()`／`ticks_diff()` 判斷目前亮或滅的階段是否到期；每輪最多推進一個階段。紅閃與綠閃共用同一個狀態機，只由固定效果規格決定顏色與次數。
 
-**解決什麼：**紅閃不使用長時間阻塞等待，也不因排程延遲一次跳過多個階段。300 ms 是設定值，不是實機精準保證。
+**解決什麼：**效果不使用長時間阻塞等待，也不因排程延遲一次跳過多個階段。300 ms 是設定值，不是實機精準保證。
 
 ### H. 網頁看到的不是控制權 → 快照、結果查詢與後端權威
 
@@ -213,17 +214,17 @@ flowchart TD
 
 ### I. 按鈕不是一個瞬間 → 去彈跳與拒絕記憶
 
-**比喻：**門鈴被按住，不代表每一毫秒都有人按了一次；而且紅閃中按下的要求不能因為後來紅閃結束就偷偷變成新要求。
+**比喻：**門鈴被按住，不代表每一毫秒都有人按了一次；而且效果中按下的要求不能因為後來效果結束就偷偷變成新要求。
 
-**程式：**`Button` 先確認穩定按下；`button1_task` 將要求送入 `CommandService`，busy 時取得拒絕 receipt，等待放開後才回到下一次按下。
+**程式：**`Button` 先確認穩定按下；`button1_task` 與 `button3_task` 在去彈跳期間以 `CommandService.busy` 記住拒絕狀態，忙碌時不提交命令，並等待放開後才回到下一次按下。
 
-**解決什麼：**防止按鈕抖動與「紅閃中按住，紅閃結束後自動補換色」的錯誤。
+**解決什麼：**防止按鈕抖動與「效果中按住，效果結束後自動補執行」的錯誤。
 
 ### J. 光線不是開關 → 雙門檻與 armed
 
-**比喻：**不要在 1000 附近一下說黑、一下說亮；進入黑暗與離開黑暗使用不同門檻。
+**比喻：**不要在 2000 附近一下說暗、一下說亮；進入黑暗與離開黑暗使用不同門檻。
 
-**程式：**ADC `< 1000` 才可能觸發；ADC `>= 1100` 才重新設定 `armed=true`。`busy` 和 `armed` 是兩件事。
+**程式：**目前模組為 ADC 越高越暗；ADC `> 2000` 才可能觸發，ADC `<= 1500` 才重新設定 `armed=true`。`busy` 和 `armed` 是兩件事。
 
 **解決什麼：**避免光線在門檻附近晃動時連續產生紅閃要求，也避免把「LED 現在可操作」誤當成「光感已允許再次觸發」。
 
@@ -245,26 +246,27 @@ flowchart TD
 
 所以本階段的目標是**先把問題和目前解法講懂、講一致**。是否存在更簡單、更可靠或更適合未來需求的機制，應在這個共同理解上再比較。
 
-## 0.8 未實作提案：如果多一個需求，按鈕 3 綠閃三次
+## 0.8 已實作需求：實體與網頁按鈕 3 綠閃三次
 
-這個例子是尚未實作的架構延伸提案，不是目前裝置功能。它用來檢查 P1 命令邊界是否容易擴充；新需求是：
+本節原為架構延伸提案；先完成實體按鈕，現在網頁儀表板也提供相同的按鈕 3：
 
-> **按鈕 3 被按下時，LED 綠色閃爍 3 次，完成後恢復原本狀態。**
+> **實體或網頁按鈕 3 被按下時，LED 綠色閃爍 3 次，完成後恢復原本狀態。**
 
 目前 RGB 色碼中，綠色是 2、紅色是 4。因此兩種效果可以寫成：
 
 | 效果 | 觸發來源 | 顏色 | 次數 |
 |---|---|---:|---:|
 | `low_light_alert` | 光照感測器 | 紅色 4 | 5 次 |
-| `green_flash_alert` | 按鈕 3 | 綠色 2 | 3 次 |
+| `green_flash_alert` | 實體／網頁按鈕 3 | 綠色 2 | 3 次 |
 
 這不是新增第二個 LED 控制者，而是新增一個要求來源與一個固定效果規格：
 
 ```text
-按鈕 1 ─┐
-網頁 ───┤
-光感 ───┼→ 同一個 LedController → 同一個 RGB LED
-按鈕 3 ─┘
+按鈕 1 ─────┐
+網頁按鈕 1 ─┤
+光感 ───────┼→ 同一個 LedController → 同一個 RGB LED
+按鈕 3 ─────┤
+網頁按鈕 3 ─┘
 ```
 
 ### 0.8.1 先決定兩種效果同時發生時的規則
@@ -320,40 +322,38 @@ LED 正常顯示藍色 1
 
 ### 0.8.4 程式整合點
 
-| 檔案 | 新增或修改內容 | 不需要新增的東西 |
+| 檔案 | 已實作內容 | 沒有新增的東西 |
 |---|---|---|
-| `config.example.py` | 提案新增 `BUTTON3_PIN`；必要時增加綠閃次數與時間設定 | 不新增 LED GPIO |
-| `main.py` | 提案建立 `Button(config.BUTTON3_PIN)`，把它傳給新任務 | 不建立第二個 `LedController` |
-| `tasks.py` | 提案新增 `button3_task`，只負責去彈跳與提交 `green_flash_alert` | 不直接呼叫 `RgbLed.write()` |
-| `services/led_controller.py` | 提案增加固定效果規格與共同效果處理 | 不新增第二個 owner 或事件迴圈 |
+| `config.example.py` | 新增 `BUTTON3_PIN = 16` | 不新增 LED GPIO |
+| `main.py` | 建立 `Button(config.BUTTON3_PIN)`，把它傳給新任務 | 不建立第二個 `LedController` |
+| `tasks.py` | 新增 `button3_task`，只負責去彈跳、忙碌按壓消耗與提交 `green_flash_alert` | 不直接呼叫 `RgbLed.write()` |
+| `services/command_service.py` | 提供唯讀 `busy`，讓按鈕在去彈跳期間記住效果已占用 | 不複製仲裁規則 |
+| `services/led_controller.py` | 增加固定效果規格並讓紅閃／綠閃共用效果狀態機 | 不新增第二個 owner 或事件迴圈 |
 | `hardware/led.py` | 不需要修改 RGB 位元輸出 | 不增加第二組硬體控制流程 |
-| `web_server.py` | 若只新增實體按鈕，通常不需要修改；若要顯示綠閃顏色，再擴充 snapshot 欄位 | 不把前端提示當控制權 |
-| `tests/` | 增加綠閃、競爭、恢復與按住按鈕測試 | 不以實機操作取代桌面回歸測試 |
+| `index.html` | 新增網頁按鈕3，向既有`POST /api/led/commands`提交`green_flash_alert`，並依`active_effect`區分紅閃／綠閃提示 | 不直接操作GPIO或在瀏覽器自行計時完成效果 |
+| `web_server.py` | 沿用既有通用命令與結果查詢端點，不需新增路由 | 不把前端停用當控制權 |
+| `tests/test_led_owner.py`、`tests/test_socket_web_server.py`、`tests/test_led_polling.cjs` | 驗證效果快照、Web命令內容、按鈕停用、結果查詢與完成恢復 | 不以實機操作取代桌面回歸測試 |
 
-效果規格可以集中成固定表，而不是建立任意優先權框架：
+效果規格集中在固定表，而不是建立任意優先權框架；tuple 依序是顏色、次數、亮毫秒、滅毫秒、是否記入低光警示歷史：
 
 ```python
 _EFFECTS = {
-    'low_light_alert': {
-        'color': 4,
-        'count': 5,
-        'on_ms': 300,
-        'off_ms': 300,
-    },
-    'green_flash_alert': {
-        'color': 2,
-        'count': 3,
-        'on_ms': 300,
-        'off_ms': 300,
-    },
+    'low_light_alert': (
+        4,
+        getattr(config, 'LIGHT_ALERT_BLINK_COUNT', 5),
+        getattr(config, 'LIGHT_ALERT_ON_MS', 300),
+        getattr(config, 'LIGHT_ALERT_OFF_MS', 300),
+        True,
+    ),
+    'green_flash_alert': (2, 3, 300, 300, False),
 }
 ```
 
-外部來源只能提交已知的效果名稱，不能任意傳入顏色、次數或時間。這是小幅資料化，不是建立複雜的通用 plugin 或優先權系統。
+外部來源只能提交已知的效果名稱，不能任意傳入顏色、次數或時間。綠閃不增加網頁既有的低光紅閃事件計數。
 
-### 0.8.5 測試清單
+### 0.8.5 測試契約
 
-新增效果至少應驗證：
+新增效果的桌面測試保持以下契約：
 
 1. 正常狀態按按鈕 3，綠閃三次後恢復原色。
 2. 原本是紅色、綠色或熄燈時，效果都恢復正確的原狀態。
@@ -363,12 +363,13 @@ _EFFECTS = {
 6. 綠閃期間光線變暗，紅閃被拒絕。
 7. 效果尚未開始但已被接受時，新的普通換色也不能插入。
 8. 綠閃中按住按鈕，效果結束後不自動補做。
-9. 連續快速按按鈕 3，不建立無限效果佇列。
+9. 連續快速按按鈕 3，不建立效果佇列。
 10. GPIO 寫入失敗時，owner 正確標記錯誤並執行安全清理。
+11. 網頁按鈕3只提交固定效果名稱，受理後查詢receipt；紅閃、綠閃或連線狀態未知時，按鈕1與按鈕3都停用。
 
-### 0.8.6 這個例子證明了什麼
+### 0.8.6 這個實作證明了什麼
 
-如果加入按鈕 3 只需要：
+加入按鈕 3 實際只需要：
 
 ```text
 新增按鈕
@@ -379,7 +380,7 @@ _EFFECTS = {
 → 使用同一個狀態機完成與恢復
 ```
 
-就表示目前架構的擴充點是清楚的。新增需求不需要重新設計 LED 控制系統，也不會回到多個任務直接搶同一個 GPIO 的舊問題。
+因此目前架構的擴充點是清楚的。新增需求沒有重新設計 LED 控制系統，也沒有回到多個任務直接搶同一個 GPIO 的舊問題。
 
 這個例子仍然沒有證明架構是唯一或最佳方案；它只證明在「另一個固定的 LED 效果」加入時，目前責任分界可以被重用。
 
@@ -509,9 +510,9 @@ sequenceDiagram
 
 **關鍵問題：為何按鈕不自己算下一色？** 因為按鈕與Web若各讀改寫會把狀態責任分散。兩者都只提交cycle，owner便能依序推進兩次；即使同一輪處理，也不合併相對變更。
 
-## 5. 案例二：光照低於閾值
+## 5. 案例二：光照高於低光觸發閾值
 
-**初始條件：**LED藍1、armed=true、busy=false、queue空；本次read取得ADC=900。
+**初始條件：**LED藍1、armed=true、busy=false、queue空；本次read取得ADC=2300。
 
 ```mermaid
 sequenceDiagram
@@ -519,7 +520,7 @@ sequenceDiagram
     participant Entry as submit受理窗口
     participant Owner as owner task
     participant Led as RgbLed與GPIO
-    Light->>Light: read得到900且armed=true
+    Light->>Light: read得到2300且armed=true
     Light->>Entry: submit low_light_alert, light
     Entry->>Entry: reserved=true並加入警示10
     Entry-->>Light: accepted
@@ -532,7 +533,7 @@ sequenceDiagram
     Owner->>Owner: receipt10=executed與reserved=false
 ```
 
-1. `tasks.light_sensor_task`拿到brightness=900；啟用警示、非busy，且900<1000、armed=true，才提交`submit('low_light_alert', 'light')`。
+1. `tasks.light_sensor_task`拿到brightness=2300；啟用警示、非busy，且2300>2000、armed=true，才提交`submit('low_light_alert', 'light')`。
 2. submit先把_reserved設true，再放警示命令，回accepted。這時還沒開始閃，但新改色已被禁止。
 3. 光照task看到受理成功才armed=false。這個變數留在該task的迴圈中，並不由owner管理。
 4. owner的_apply在取警示時建立_effect，saved=(1,true)，phase_on=true、completed=0、started=本輪ticks_ms；300ms與五次來自config。
@@ -706,9 +707,9 @@ sequenceDiagram
     Browser->>Browser: 顯示未受理且更新LED狀態
 ```
 
-正常時POST回202與ID，不等待owner完成。`index.html.toggleLED()`會查`GET /api/led/commands/ID`，區分executed、rejected、failed、cancelled；最近16筆之外回404，應顯示結果未知或過期，不應斷言命令沒有執行。
+正常時POST回202與ID，不等待owner完成。`index.html`的按鈕1呼叫`/api/led/toggle`提交`cycle`；網頁按鈕3呼叫既有`/api/led/commands`提交固定`green_flash_alert`。共用流程查`GET /api/led/commands/ID`，區分executed、rejected、failed、cancelled；綠閃使用200 ms間隔、最多12次查詢，避免用50 ms頻率持續查詢約1.8秒的效果。
 
-實體按鈕與網頁的共同點是只能提交cycle；差別是實體需要消耗按下／放開，Web需要HTTP受理狀態與結果查詢。兩者不能只用同一種前端停用方式解決。
+實體按鈕需要消耗按下／放開生命週期；Web按鈕則需要HTTP受理狀態與結果查詢。兩者都只能提交命令，不能以任何前端停用機制取代owner的busy仲裁。
 
 > 閱讀版本提示：8A、8B說明快速通道的第一版；其中「單次查詢失敗立即停用」已由8C的有效期限判斷取代。分流與後端仲裁仍保留。
 
@@ -725,9 +726,9 @@ sequenceDiagram
     Browser->>DataApi: GET /api/data
     Browser->>FastApi: GET /api/led/status
     FastApi->>Owner: snapshot 僅複製RAM狀態
-    Owner-->>FastApi: alert_active與available
+    Owner-->>FastApi: alert_active、active_effect與available
     FastApi-->>Browser: JSON及no-store
-    Browser->>Browser: 更新警示提示及停用按鈕
+    Browser->>Browser: 更新紅閃或綠閃提示及停用LED按鈕
     DataApi-->>Browser: 較慢的感測回應
     Browser->>Browser: 只更新感測卡片不更新LED
     Note over Browser,FastApi: LED請求完成後再等200ms開始下一筆
@@ -899,7 +900,7 @@ LED資料成功代表快照確認，POST回409則是後端明确拒絕的控制�
 
 #### 部署與實測記錄
 
-新版只改index.html，web_server.py須已具有/api/led/status。伺服器啟動時讀入HTML到RAM，因此上傳後應重啟ESP32，再以Ctrl+F5強制刷新瀏覽器。只上傳檔案不代表現有頁面已執行新程式。
+該次舊版伺服器會在啟動時把HTML讀入RAM，因此部署後需重啟；目前版本已改成逐請求以1024-byte chunk串流`index.html`，不再保留`HTML_PAGE`。瀏覽器仍需重新整理，才會執行新頁面程式。
 
 比較基線f6b8e53保存「單次失敗立即停用」，5f3807c實作有效期限；ab5465f另調整PIR輸出，與這項判斷無關。使用者最初只上傳HTML仍見舊現象，後於瀏覽器重新整理後回報不再發生瞬間失能；不能因此推定最初所有失敗都由網路造成。先前20個Python與2組JavaScript桌面測試通過，新狀態測試包含短暫失敗、LED過期但感測成功、整體連線過期與相同快照恢復。
 
@@ -914,14 +915,14 @@ sequenceDiagram
     participant Owner as owner
     participant Light as 光照task
     Owner->>Owner: 警示結束並busy=false
-    Light->>Light: ADC500且armed=false，不submit
-    Light->>Light: ADC1050仍不rearm
-    Light->>Light: 警示後ADC1100，armed=true
-    Light->>Light: 再降999，條件符合
+    Light->>Light: ADC2300且armed=false，不submit
+    Light->>Light: ADC1700仍不rearm
+    Light->>Light: 警示後ADC1500，armed=true
+    Light->>Light: 再升2001，條件符合
     Light->>Owner: 經submit受理新警示
 ```
 
-圖中最後一箭頭代表要求送到owner的命令入口，不是直接呼叫GPIO。busy由`LedController`管理，armed是`light_sensor_task`局部變數；解除警示不會替光照任務重設armed。警示期間短暫變亮也不算rearm，必須完成後再取樣到1100或以上。
+圖中最後一箭頭代表要求送到owner的命令入口，不是直接呼叫GPIO。busy由`LedController`管理，armed是`light_sensor_task`局部變數；解除警示不會替光照任務重設armed。警示期間短暫變亮也不算rearm，必須完成後再取樣到1500或以下。
 
 ## 10. 課堂演練與自我檢查
 
@@ -934,10 +935,10 @@ sequenceDiagram
 | 藍1正在紅閃，正常色碼要改4嗎？ | 不改，4只作暫時輸出 |
 | 按鈕accepted又變rejected，是錯誤嗎？ | 警示在執行前到達可依政策拒絕，是可解釋結果 |
 | 按住到警示結束會換色嗎？ | 不會，必須放開重按 |
-| 閃完又遮光為何沒再閃？ | armed還未由警示後ADC>=1100重新允許 |
-| 哪裡能看到最終命令結果？ | result(ID)或GET命令結果API，而非旧reply副本 |
+| 閃完又遮光為何沒再閃？ | armed還未由警示後ADC<=1500重新允許 |
+| 哪裡能看到最終命令結果？ | result(ID)或GET命令結果API，而非舊receipt副本 |
 
-实機操作先觀察普通切色與低光警示，再做警示中按住與1100解除。案例6的精細交錯需要序列埠命令ID／結果配合，不能僅用肉眼宣稱已觀察到某個排程順序。後續如需課堂可控注入，可另設測試模式；本次不改程式或新增注入介面。
+實機操作先觀察普通切色、按鈕3綠閃與低光警示，再做效果中按住及ADC降至1500解除。案例6的精細交錯需要序列埠命令ID／結果配合，不能僅用肉眼宣稱已觀察到某個排程順序。後續如需課堂可控注入，可另設測試模式。
 
 ## 附錄：程式規格、仲裁理論與部署參考
 
@@ -968,7 +969,7 @@ flowchart LR
     Entry -->|receipt 或 rejected| Reply[來源收到命令ID與狀態]
     Queue --> Owner[唯一 LED owner task]
     Owner --> Normal[正常色碼與亮滅]
-    Owner --> Effect[五次警示狀態機]
+    Owner --> Effect[紅閃或綠閃效果狀態機]
     Normal --> Render[決定當次輸出]
     Effect --> Render
     Render --> Hardware[RgbLed GPIO adapter]
@@ -977,7 +978,7 @@ flowchart LR
     Api --> Browser[網頁顯示]
 ```
 
-核心三個來源是按鈕、Web、光照；MQTT callback bridge 也將既有 `led:4`／`led=4` 格式交給同一個CommandService，避免留下第四個直接寫入入口。桌面 fake MQTT／fake GPIO 已驗證 adapter 路徑，但尚未進行真 Broker 或 ESP32 實機端到端測試。
+核心來源是按鈕1、按鈕3、Web與光照；MQTT callback bridge也將既有`led:4`／`led=4`格式交給同一個CommandService，避免留下直接寫入入口。桌面fake MQTT／fake GPIO已驗證adapter路徑，但按鈕3與真Broker尚未進行ESP32實機端到端測試。
 
 #### 對照實作檔案
 
@@ -985,6 +986,7 @@ flowchart LR
 |---|---|
 | main.main | 建立LedController、CommandService、create_task(run)，注入Web並傳給生產者 |
 | tasks.button1_task | 讀按鈕、去彈跳、提交cycle，等待放開；忙碌時由共同命令入口回覆拒絕 |
+| tasks.button3_task | 讀按鈕3、去彈跳、忙碌按壓消耗、空閒時提交green_flash_alert並等待放開 |
 | tasks.light_sensor_task | 50 ms取樣，管理armed與裝置設定的遲滯，提交警示 |
 | services.command_service.CommandService.submit | 產生request ID並轉交LedController，不碰GPIO |
 | services.led_controller.LedController.run / _step / _apply | 唯一owner，每輪最多4筆命令，推進效果並渲染 |
@@ -1086,17 +1088,17 @@ stateDiagram-v2
     Stopped --> [*]
 ```
 
-效果儲存phase_on、completed、started、count、on_ms、off_ms、saved、receipt。正常色碼／亮滅不被紅亮與全滅改寫，結束才恢復保存值。相對時間以time.ticks_ms/ticks_diff計算，支援tick回繞；不是從uasyncio匯入ticks_ms，也不直接減計數器。
+效果儲存color、phase_on、completed、started、count、on_ms、off_ms、records_alert、saved與receipt。正常色碼／亮滅不被紅亮、綠亮與全滅改寫，結束才恢復保存值；只有低光紅閃寫入既有警示歷史。相對時間以time.ticks_ms/ticks_diff計算，支援tick回繞。
 
-owner每20 ms讓出排程；每輪最多4筆命令，避免一直drain而餓死效果。每輪最多推進一個亮滅階段，發生延遲時延長該階段，不快速補跳多個階段造成肉眼看不到五次。設定300 ms不代表硬體精準時間，仍受整個迴圈其他工作影響。
+owner每20 ms讓出排程；每輪最多4筆命令，避免一直drain而餓死效果。每輪最多推進一個亮滅階段，發生延遲時延長該階段，不快速補跳多個階段造成肉眼看不到指定次數。設定300 ms不代表硬體精準時間，仍受整個迴圈其他工作影響。
 
 停止由request_stop在控制面設定停止、拒絕待處理；owner在下一次排程進入finally、標記未完成效果cancelled、寫0並發出stopped Event。main等待stopped後再結束喇叭清理。GPIO寫入錯誤會標failed並讓owner退出；若硬體連熄燈都失敗，軟體不能保證安全輸出。
 
-### A6. 重新允許觸發：仍須先回到1100
+### A6. 重新允許觸發：仍須先回到1500
 
-> **警示完成不等於armed=true。警示結束後先取樣到ADC ≥ 1100，再降至ADC < 1000，才再次受理警示。**
+> **警示完成不等於armed=true。警示結束後先取樣到ADC ≤ 1500，再升至ADC > 2000，才再次受理警示。**
 
-armed仍在光照生產者內管理，50 ms取樣；警示busy期間不rearm。500→1050→500不重播；500→1100→999才重播。開機已暗仍觸發一次。兩個閾值形成遲滯，沒有新增冷卻時間或連續三次確認，避免暗中改變已確認功能。
+armed仍在光照生產者內管理，50 ms取樣；警示busy期間不rearm。2300→1700→2300不重播；2300→1500→2001才重播。開機已暗仍觸發一次。兩個閾值形成遲滯，沒有新增冷卻時間或連續三次確認。
 
 ### A7. 與上一版比較：是否更容易理解？
 
@@ -1111,25 +1113,26 @@ armed仍在光照生產者內管理，50 ms取樣；警示busy期間不rearm。5
 
 可讀性初步評估：來源與硬體層更簡單，責任較集中；整體程式不一定更短，尤其加入受理結果與查詢是新增複雜度。先讀submit→_apply→_step→run較容易理解；狀態機對初學者需要講解時間與階段。需實際教學及實機使用後再決定是否保留此架構，不能僅依測試宣稱更穩定。
 
-不採用普通await Lock，因警示期间需拒絕而非等待；不接受背景改色，因完成後要恢復原狀；不加入通用優先權／搶占框架，因目前規則只有警示與關機。Event本版只用於owner停止通知，owner不靠busy Event搶GPIO，也沒有多writer token交接。
+不採用普通await Lock，因效果期間需拒絕而非等待；不接受背景改色，因完成後要恢復原狀；不加入通用優先權／搶占框架，因目前規則是先接受的紅閃或綠閃完成，後來效果以busy拒絕。Event本版只用於owner停止通知。
 
 ### A8. 部署與驗收
 
-上傳`main.py`、`tasks.py`、`web_server.py`、`index.html`、`hardware/led.py`、`hardware/sensors.py`、`communication/mqtt_client.py`、`services/command_service.py`、`services/led_controller.py`、`services/sensor_snapshot.py`、`config.py`。私人`config.py`的WiFi／密碼必須保留，只同步非機密設定；不要部署`mdy_01/`、`mdy_02/`或`lib_backup/`。重啟ESP32載入新的HTML與服務，確認序列埠印出LED Controller啟動。
+上傳`main.py`、`tasks.py`、`web_server.py`、`index.html`、`hardware/led.py`、`hardware/button.py`、`hardware/sensors.py`、`communication/mqtt_client.py`、`services/command_service.py`、`services/led_controller.py`、`services/sensor_snapshot.py`、`config.py`。ESP32的`config.py`須保留WiFi／密碼並加入`BUTTON3_PIN = 16`；不要部署任何`mdy_N/`備份目錄。
 
 有意的差異：安全初始化先熄燈，白色7由owner在系統初始化完成後首次渲染，所以WiFi／NTP／MQTT初始化等待期間不再顯示白色。效果約20 ms frame延遲；Web既有URL維持，但成功受理從200改202。這些不是硬體故障。
 
 驗收項目：
 
-1. 正常時實體／Web各按一次，色碼前進兩次，循環0～7。
-2. 暗觸發完整五次，原色或原先0熄滅恢復；期間按鈕不插入，按住直到結束不补執行。
-3. 已受理但尚未執行的改色遇到警示，網頁顯示拒絕而不是執行成功。
-4. 持續暗不重播，回亮到1100再暗才重播；閾值附近波動與警示期間亮暗切換不排隊。
-5. 刷RFID、PIR音樂、Web刷新正常；中斷後熄燈；重啟結果紀錄與ID重置。
+1. 正常時按鈕1與Web各按一次，色碼前進兩次，循環0～7。
+2. 按鈕3綠閃三次後恢復原色或原先熄滅；期間按鈕1、按鈕3與低光效果不插入，按住直到結束不補執行。
+3. 暗觸發完整五次紅閃，原色或原先熄滅恢復；期間一般命令與綠閃不插入。
+4. 已受理但尚未執行的改色遇到任一效果，結果顯示`rejected / alert_started`。
+5. 持續暗不重播，ADC降至1500或以下再升至2000以上才重播；閾值附近波動不排隊。
+6. 刷RFID、PIR音樂、Web刷新正常；中斷後熄燈；重啟結果紀錄與ID重置。
 
-桌面20個Python測試通過，涵蓋命令FIFO、兩次cycle不合併、警示預約競爭、清除待執行改色、五次輸出／恢復、時間回繞、延遲不跳階段、有界記錄／佇列、取消／關機、GPIO失敗、Web202／409／結果查詢與既有PIR／RFID回歸。另以固定隨機種子進行1000輪混合命令、再200輪收尾，確認記憶體上限與效果結束；並驗證main任務錯誤後等待owner熄燈。網頁JavaScript模擬測試通過受理／執行／後續拒絕與原功能。非ESP32實機、broker、真實瀏覽器布局或實機壓力驗證。
+桌面測試涵蓋綠閃三次、不同原狀恢復、紅綠效果互斥、待執行命令清除、忙碌按壓消耗、GPIO失敗，以及既有LED／Web／MQTT／PIR／RFID回歸。未進行按鈕3 ESP32實機接線、真Broker、真實瀏覽器布局或實機壓力驗證。
 
-本講義全部20張Mermaid圖已使用11.13.0實際解析，20/20通過；未做Typora／VS Code視覺布局驗證，解析不等於所有編輯器的視覺布局一致。
+本講義全部21張Mermaid圖已使用11.13.0實際解析，21/21通過；未做Typora／VS Code視覺布局驗證，解析不等於所有編輯器的視覺布局一致。
 
 ### A9. 比較與回復
 

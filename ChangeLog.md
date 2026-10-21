@@ -16,6 +16,57 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261021-041｜保存首頁記憶體事件證據與防回歸規則
+
+- **類別：**需求變更（記憶體治理文件）。
+- **日期／紀錄時間：**2026-10-21 23:45:22 +08:00，工具取得台北時間。
+- **原因：**使用者確認「實體第三按鈕可能降低heap餘裕，使既有整檔HTML配置缺陷首次浮現」的判斷，要求保存證據與規則，避免日後新增硬體、task或網頁內容時再次發生記憶體不足。
+- **作法：**在`WEB_UI_EXECUTION_GUIDE.md`記錄首次配置失敗31,232 bytes、實體按鈕回合首頁31,308 bytes、網頁按鈕3後首頁32,675 bytes與受限TCP smoke的33次`read(1024)`；明確區分整檔read／encode的直接根因、第三個`Button`／`Pin`／coroutine的可能觸發作用，以及缺少當時`gc.mem_free()`所以不能證明唯一因果。新增不可破壞規則與發佈門檻，並在`SYSTEM_ARCHITECTURE.md`保存精簡版記憶體不變量。
+- **影響：**未修改執行程式、設定或測試；後續靜態檔必須維持1024-byte串流，不得恢復`HTML_PAGE`或整檔read。新增長駐硬體／task的ESP32驗收應記錄初始化與Web啟動前後的free heap；多頁面並發仍屬未驗證邊界。本回合只有文件變更，依規則不建立`mdy_07/`。
+- **驗證：**文件數值以`mdy_05/index.html`、目前`index.html`、Git blob與既有受限TCP smoke輸出核對；Mermaid 11.13.0實際解析目前工作區五份修改Markdown共34個圖表區塊，34/34通過；`git diff --check`無差異錯誤（僅既有Git換行提示）；確認未建立`mdy_07/`。本回合未修改程式，因此未新增或重跑程式測試。
+- **部署／回復：**本紀錄本身不需上傳ESP32；裝置仍須使用CHG-20261021-040的串流版`web_server.py`。回復文件不會改變裝置行為，但不得據此回復到整檔HTML載入版本。
+
+## CHG-20261021-040｜首頁改為分塊串流，避免 31 KB RAM 配置失敗
+
+- **類別：**BUG。
+- **日期／紀錄時間：**2026-10-21 23:12:04 +08:00，工具取得台北時間。
+- **原因：**使用者在ESP32看到「index.html文件未找到」，實際錯誤為`memory allocation failed, allocating 31232 bytes`。`web_server_task()`啟動時用`f.read()`把完整`index.html`配置成約31 KB的`HTML_PAGE`字串；即使成功，`_write_response()`仍會把字串encode成另一份大型bytes。錯誤頁把所有讀檔例外都誤稱為文件未找到，遮蔽了真正的RAM不足。
+- **作法：**移除`HTML_PAGE`與`load_html()`；`GET /`及`GET /index.html`改用既有`Response.send_file()`直接開啟Flash檔案，`_write_response()`每次只讀取並送出最多1024 bytes，完成或例外時關檔。靜態檔案無法開啟時在序列埠記錄檔名與原始例外並回404小型文字。新增回歸測試，以拒絕無參數／整檔`read()`的受限檔案物件證明首頁只呼叫`read(1024)`，並同步更新Web與系統架構文件。修改前原檔保存於`mdy_06/`。
+- **影響：**首頁不再於開機或請求期間配置完整31 KB字串及其bytes副本；每個首頁連線只保有檔案物件、小型HTTP header與目前chunk。每次首頁請求會重新開啟Flash檔案，換取顯著較低的RAM峰值；API與前端內容不變。
+- **驗證：**`python -B -m unittest tests.test_socket_web_server -v`通過8/8；完整`python -B -m unittest discover -s tests -v`通過47/47；兩組Node前端測試與指定Python檔案`py_compile`通過。受限記憶體TCP smoke以會拒絕整檔read的檔案物件實際請求`GET /`，完整收到32675 bytes，伺服器共呼叫33次`read(1024)`，沒有整檔配置。Mermaid 11.13.0實際解析本次工作區五份Markdown共34個圖表區塊，34/34通過；`git diff --check`無差異錯誤（僅既有Git換行提示）。未部署ESP32，無法以桌面測試宣稱已確認裝置實際free heap。
+- **部署／回復：**只需上傳`web_server.py`並重啟ESP32；保留目前`index.html`與其他同版本檔案，瀏覽器再以Ctrl+F5重新整理。不要部署`mdy_06/`。回復時以`mdy_06/web_server.py`及對應測試還原，但會恢復整檔RAM配置風險。
+
+## CHG-20261021-039｜在網頁加入按鈕 3 綠閃控制
+
+- **類別：**需求變更（Web LED 操作）。
+- **日期／紀錄時間：**2026-10-21 22:44:03 +08:00，工具取得台北時間。
+- **原因：**使用者要求將已完成的實體按鈕3綠閃三次功能加入網頁，使瀏覽器可透過相同單一LED owner執行固定綠閃效果。
+- **作法：**`index.html`新增「按鈕 3: 綠閃三次」，向既有`POST /api/led/commands`提交`green_flash_alert`，共用命令受理、receipt結果查詢與LED狀態刷新；綠閃結果每200 ms查詢、最多12次，避免沿用短命令50 ms頻率。按鈕1與按鈕3共用停用政策。`LedController.snapshot()`新增`active_effect`，從命令受理的reserved窗口到效果完成都回傳效果名稱，讓頁面正確區分低光紅閃、按鈕3綠閃與未知效果。新增owner快照、通用Web命令及實際頁面JavaScript測試，並同步更新三份架構／操作文件。修改前原檔保存於`mdy_05/`。
+- **影響：**網頁按鈕3與實體按鈕3提交相同固定效果，不新增HTTP路由、第二個owner或瀏覽器端效果計時器。任一效果或LED狀態未知時，兩個LED按鈕都停用；後端busy仍是最終權威。網頁會在`active_effect=green_flash_alert`時顯示綠燈效果中，不再誤稱紅燈警示。
+- **驗證：**目標Python測試20/20、完整`python -B -m unittest discover -s tests -v` 46/46通過；指定Python檔案`py_compile`通過；`node tests/test_led_polling.cjs`與`node tests/test_rfid_ui.cjs`通過。實際Web路由smoke確認`POST /api/led/commands → CommandService → LedController`輸出`[2, 0, 2, 0, 2, 0, 7]`、receipt為executed且`active_effect`清除。Chromium以1280×900檢查三個按鈕同列、按鈕3可見且可操作；點擊後觀察到POST固定命令、GET結果與GET狀態三段請求，畫面顯示「命令303已執行」並重新啟用按鈕；HTTP回應為本機stub，不是ESP32。以Mermaid 11.13.0解析本次四份Markdown的全部22個圖表區塊，22/22通過。未部署ESP32，未執行實體LED或多頁面壓力驗證。
+- **部署／回復：**上傳`index.html`與`services/led_controller.py`後重啟ESP32，再以Ctrl+F5強制重新整理頁面；`web_server.py`沿用既有通用命令路由，不需更新。不要部署`mdy_05/`。回復時以`mdy_05/`對應原檔還原程式與測試，並同步回復本次文件。
+
+## CHG-20261021-038｜實作按鈕 3 綠閃三次
+
+- **類別：**需求變更（實體輸入與 LED 效果）。
+- **日期／紀錄時間：**2026-10-21 22:21:23 +08:00，工具取得台北時間。
+- **原因：**使用者要求完成 `LED_SINGLE_OWNER_GUIDE.md` 0.8 原未實作提案：新增實體按鈕 3，按下後讓同一顆 RGB LED 綠色閃爍三次，且不得破壞既有低光紅閃的 atomic、拒絕且不排隊政策。
+- **作法：**以目前未使用的 GPIO 16 作為 `BUTTON3_PIN`；`main.py` 建立第三顆 `Button` 並啟動 `button3_task`。`CommandService`提供唯讀`busy`，按鈕1與按鈕3在去彈跳期間記住忙碌狀態，忙碌按壓只消耗到放開，不在效果結束後補送。`LedController`以共同`_EFFECTS`規格執行低光紅閃與固定綠色2、三次、亮滅各300 ms的`green_flash_alert`；任一效果受理即reserved、清除尚未執行的一般命令，效果彼此以busy拒絕，完成後恢復原本色碼與亮滅狀態。綠閃不寫入低光紅色警示歷史。新增恢復、互斥、按住消耗及GPIO失敗測試，並同步更新三份架構／操作文件。修改前原檔保存於`mdy_04/`；私人`config.py`只加入腳位，不備份、不納入Git。
+- **影響：**應用協程由13個增為14個；按鈕3按下後名義效果時間約1.8秒，實際時間仍受20 ms owner frame與其他協程排程影響。GPIO 16需以`PULL_UP`接法將按鈕接至GND。紅閃、綠閃與普通改色仍只有一個`LedController`寫RGB GPIO，沒有新增第二個owner。既有Web API及頁面不新增按鈕3入口。
+- **驗證：**`python -B -m unittest tests.test_led_owner -v`通過13/13；`python -B -m unittest discover -s tests -v`通過46/46；指定Python檔案`py_compile`通過。額外smoke確認`button3 → CommandService → LedController`實際輸出`[2, 0, 2, 0, 2, 0, 4]`、receipt為executed且解除busy。以Mermaid 11.13.0實際解析本次四份Markdown的全部22個圖表區塊，22/22通過（講義21、系統架構1；其餘0）。未部署ESP32，未驗證GPIO 16實際接線、電氣相容性、瀏覽器／Markdown視覺布局或肉眼閃爍時序。
+- **部署／回復：**將`main.py`、`tasks.py`、`services/command_service.py`、`services/led_controller.py`與保留私人WiFi資料的`config.py`上傳至ESP32；按鈕接在GPIO 16與GND之間後重啟。不要部署`mdy_04/`。回復時以`mdy_04/`對應原檔還原Git追蹤程式與測試，私人`config.py`手動移除`BUTTON3_PIN`，並同步回復本次文件。
+
+## CHG-20261021-037｜依實測校準高值遮光門檻
+
+- **類別：**需求變更（實機光感校準）。
+- **日期／紀錄時間：**2026-10-21 21:25:38 +08:00，工具取得台北時間。
+- **原因：**使用者回報目前光照下 ADC 常態約 300、手指遮光約 2300，並指定 ADC 大於 2000 時觸發低光警示、降至 1500 時重置。原本本機私人 `config.py` 未啟用高值越暗模式，仍以低於 1000 判定暗，不符合此模組的實測方向。
+- **作法：**在本機私人 `config.py` 與公開 `config.example.py` 設定 `LIGHT_DARK_WHEN_HIGH = True`、`LIGHT_ALERT_TRIGGER_ADC = 2000`、`LIGHT_ALERT_RESET_ADC = 1500`；同步更新註解，明確記錄嚴格大於 2000 才觸發、1500（含）以下重置。調整測試，使低值越暗案例明確固定測試極性，舊設定相容案例同時移除極性欄位，避免本機設定污染獨立行為測試。修改前的公開設定與兩個測試檔保存於 `mdy_03/`；私人 `config.py` 因含 WiFi profiles，不備份、不納入 Git。
+- **影響：**ADC 2001～4095 視為低光並觸發一次警示；0～1500 重新 armed；1501～2000 為遲滯區，2000 本身不觸發。依使用者實測，300 不觸發且可重置，2300 會觸發。未修改光感輪詢與 LED 警示執行程式。
+- **驗證：**`python -B -m unittest discover -s tests -v` 通過 42/42；以本機實際 `config.py` 執行 smoke 驗證，確認 300／1500 不觸發且可重置、1501／2000 位於遲滯區、2001／2300 觸發；`node tests/test_led_polling.cjs` 通過。未部署至 ESP32，未執行實體光感與 LED 驗證。本次修改的 Markdown 沒有 Mermaid 區塊，無需 Mermaid parser。
+- **部署／回復：**在 ESP32 既有私人 `config.py` 套用三個光感設定後重啟；不要以 `config.example.py` 覆蓋 WiFi profiles。若需回復，將設定恢復為 `LIGHT_DARK_WHEN_HIGH = False`、trigger 1000、reset 1100；Git 追蹤檔可參照 `mdy_03/` 還原，私人設定需手動回復。
+
+
 ## CHG-20261020-036｜支援 ADC 越高越暗的光感模組
 
 - **類別：**需求變更（硬體校準與控制方向）。

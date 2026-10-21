@@ -8,6 +8,10 @@ class CommandService:
         self._controller = controller
         self._next_request_id = 1
 
+    @property
+    def busy(self):
+        return self._controller.busy
+
     def submit(self, kind, source, value=None):
         request_id = self._next_request_id
         self._next_request_id += 1

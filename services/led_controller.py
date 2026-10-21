@@ -8,7 +8,20 @@ from communication.wifi import get_current_time
 class LedController:
     """唯一 LED 硬體寫入者；所有 producer 只提交命令。"""
 
-    VALID_KINDS = ('cycle', 'set_color', 'set_mode', 'low_light_alert')
+    _EFFECTS = {
+        'low_light_alert': (
+            4,
+            getattr(config, 'LIGHT_ALERT_BLINK_COUNT', 5),
+            getattr(config, 'LIGHT_ALERT_ON_MS', 300),
+            getattr(config, 'LIGHT_ALERT_OFF_MS', 300),
+            True,
+        ),
+        'green_flash_alert': (2, 3, 300, 300, False),
+    }
+    VALID_KINDS = (
+        'cycle', 'set_color', 'set_mode',
+        'low_light_alert', 'green_flash_alert',
+    )
     VALID_MODES = ('AUTO', 'MANUAL')
 
     def __init__(self, hardware, clock=None, mode=None):
@@ -26,6 +39,7 @@ class LedController:
         self._mode = configured_mode if configured_mode in self.VALID_MODES else 'AUTO'
         self._applied_output = None
         self._effect = None
+        self._active_effect_kind = None
         self._inflight = None
         self._error = None
         self._alert_count = 0
@@ -76,13 +90,15 @@ class LedController:
             reason = 'stopped'
         elif reason is None and self.busy:
             reason = 'busy'
-        elif reason is None and kind != 'low_light_alert' and len(self._queue) >= self.capacity:
+        elif (reason is None and kind not in self._EFFECTS
+              and len(self._queue) >= self.capacity):
             reason = 'queue_full'
         if reason is not None:
             receipt.update(status='rejected', reason=reason)
             return dict(receipt)
 
-        if kind == 'low_light_alert':
+        if kind in self._EFFECTS:
+            self._active_effect_kind = kind
             self._reserved = True
             self._reject_pending('alert_started')
         self._queue.append((kind, value, receipt))
@@ -133,6 +149,7 @@ class LedController:
             'color_index': self._desired_color,
             'is_on': self._enabled,
             'alert_active': self.busy,
+            'active_effect': self._active_effect_kind,
             'queue_depth': len(self._queue),
             'queue_capacity': self.capacity,
             'error': self._error,
@@ -161,14 +178,17 @@ class LedController:
             self._alert_log.pop(0)
 
     def _apply(self, kind, value, receipt, now):
-        if kind == 'low_light_alert':
+        if kind in self._EFFECTS:
+            color, count, on_ms, off_ms, records_alert = self._EFFECTS[kind]
             self._effect = {
+                'color': color,
                 'phase_on': True,
                 'completed': 0,
                 'started': now,
-                'count': getattr(config, 'LIGHT_ALERT_BLINK_COUNT', 5),
-                'on_ms': getattr(config, 'LIGHT_ALERT_ON_MS', 300),
-                'off_ms': getattr(config, 'LIGHT_ALERT_OFF_MS', 300),
+                'count': count,
+                'on_ms': on_ms,
+                'off_ms': off_ms,
+                'records_alert': records_alert,
                 'saved': (self._desired_color, self._enabled),
                 'receipt': receipt,
             }
@@ -190,7 +210,7 @@ class LedController:
                 break
             kind, value, receipt = self._queue.pop(0)
             self._apply(kind, value, receipt, now)
-            if kind != 'low_light_alert' and receipt['status'] == 'executing':
+            if kind not in self._EFFECTS and receipt['status'] == 'executing':
                 self._inflight = receipt
                 self._write_output(self._desired_color if self._enabled else 0)
                 receipt['status'] = 'executed'
@@ -208,17 +228,20 @@ class LedController:
                     effect['completed'] += 1
                     if effect['completed'] >= effect['count']:
                         self._desired_color, self._enabled = effect['saved']
-                        self._record_alert_event()
+                        if effect['records_alert']:
+                            self._record_alert_event()
                         finished = effect['receipt']
                         self._effect = None
                     else:
                         effect['phase_on'] = True
 
-        output = ((4 if self._effect['phase_on'] else 0) if self._effect
+        output = ((self._effect['color'] if self._effect['phase_on'] else 0)
+                  if self._effect
                   else (self._desired_color if self._enabled else 0))
         self._write_output(output)
         if finished is not None:
             finished['status'] = 'executed'
+            self._active_effect_kind = None
             self._reserved = False
 
     def _write_output(self, output):
@@ -246,7 +269,7 @@ class LedController:
         finally:
             self._stopping = True
             for kind, _, receipt in self._queue:
-                if kind == 'low_light_alert' and receipt['status'] == 'accepted':
+                if kind in self._EFFECTS and receipt['status'] == 'accepted':
                     receipt.update(status='cancelled', reason='stopped')
             self._reject_pending('stopped')
             if self._effect is not None:
@@ -254,6 +277,7 @@ class LedController:
                 if receipt['status'] in ('accepted', 'executing'):
                     receipt.update(status='cancelled', reason='stopped')
             self._effect = None
+            self._active_effect_kind = None
             self._reserved = False
             try:
                 self._write_output(0)

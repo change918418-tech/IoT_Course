@@ -94,7 +94,8 @@ class Response:
             headers['Content-Length'] = str(stat[6] if len(stat) > 6 else stat.st_size)
             f = open(filename, 'rb')
             return cls(body=f, status_code=status_code, headers=headers)
-        except Exception:
+        except Exception as e:
+            print(f"[Web] 靜態檔案開啟失敗: {filename}: {e}")
             return cls('File not found', status_code=404)
 
 
@@ -253,18 +254,6 @@ led_controller = None
 rfid_state = new_rfid_state()
 motion_state = new_motion_state()
 
-# HTML 頁面（從 index.html 導入）
-HTML_PAGE = None
-
-def load_html():
-    """載入 HTML 頁面"""
-    global HTML_PAGE
-    try:
-        with open('index.html', 'r', encoding='utf-8') as f:
-            HTML_PAGE = f.read()
-    except Exception as e:
-        print(f"[Web] 讀取 index.html 失敗: {e}")
-        HTML_PAGE = '<html><head><meta charset="utf-8"><title>IoT Web Server</title></head><body><h1>IoT Web Server</h1><p>❌ index.html 文件未找到</p><p>錯誤詳情: {}</p></body></html>'.format(str(e))
 
 
 # ==================== 工具函數 ====================
@@ -313,20 +302,20 @@ def get_current_light():
 
 @app.route('/')
 async def index(request):
-    """主頁面：返回 HTML UI"""
+    """Stream the dashboard from Flash without allocating the whole file."""
     print("[Web] GET / (主頁)")
-    if HTML_PAGE is None:
-        load_html()
-    return Response(HTML_PAGE, headers={'Content-Type': 'text/html; charset=utf-8'})
+    return Response.send_file(
+        'index.html',
+        content_type='text/html; charset=utf-8')
 
 
 @app.route('/index.html')
 async def index_html(request):
-    """/index.html 路由（備用）"""
+    """Stream the dashboard through the explicit file route."""
     print("[Web] GET /index.html")
-    if HTML_PAGE is None:
-        load_html()
-    return Response(HTML_PAGE, headers={'Content-Type': 'text/html; charset=utf-8'})
+    return Response.send_file(
+        'index.html',
+        content_type='text/html; charset=utf-8')
 
 @app.route('/test')
 async def test_page(request):
@@ -347,7 +336,7 @@ async def test_page(request):
 
 @app.route('/assets/uplot/1.6.32/uPlot.iife.min.js')
 async def uplot_javascript(request):
-    """Serve the pinned local uPlot runtime without loading it into HTML_PAGE."""
+    """Serve the pinned local uPlot runtime through the file stream."""
     return Response.send_file(
         'assets/uplot/1.6.32/uPlot.iife.min.js',
         content_type='application/javascript; charset=utf-8',
@@ -561,8 +550,6 @@ async def web_server_task():
     print("Socket Web Server 初始化")
     print("="*60 + "\n")
     
-    # 先載入 HTML
-    load_html()
     
     try:
         # 獲取 WiFi IP 地址

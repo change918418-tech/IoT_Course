@@ -13,6 +13,7 @@ LED_BLUE_PIN = 33
 # 按鈕腳位配置（GPIO）
 BUTTON1_PIN = 17
 BUTTON2_PIN = 21
+BUTTON3_PIN = 16
 
 # 感測器腳位配置
 DHT11_PIN = 18
@@ -37,15 +38,15 @@ RFID_CS_PIN = 13
 # ==================== 感測器參數 ====================
 
 # 光感測器閾值
-# False：ADC 越低越暗；True：ADC 越高越暗。
-# 高值越暗的模組若實測有光約 1110、無光約 2700，可先以
-# trigger=2200、reset=1600 校準，再依現場波動調整。
+# 此模組實測有光約 300、手指遮光約 2300，因此 ADC 越高越暗。
+# 高於 2000 觸發低光警示；降至 1500（含）以下重新允許觸發。
+# 1501～2000 為遲滯區，可避免臨界值附近反覆觸發。
 # LED 控制模式：AUTO 允許光感低光警示；MANUAL 不由光感覆蓋使用者命令
 LED_CONTROL_MODE = 'AUTO'
 LIGHT_ALERT_ENABLED = True
-LIGHT_DARK_WHEN_HIGH = False
-LIGHT_ALERT_TRIGGER_ADC = 1000  # 低值越暗時：嚴格低於此值觸發一次
-LIGHT_ALERT_RESET_ADC = 1100    # 低值越暗時：回升至此值以上重新允許
+LIGHT_DARK_WHEN_HIGH = True
+LIGHT_ALERT_TRIGGER_ADC = 2000  # 嚴格高於此值觸發一次
+LIGHT_ALERT_RESET_ADC = 1500    # 降至此值（含）以下重新允許
 LIGHT_ALERT_BLINK_COUNT = 5
 LIGHT_ALERT_ON_MS = 300
 LIGHT_ALERT_OFF_MS = 300

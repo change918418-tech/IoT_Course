@@ -6,8 +6,8 @@ test_socket_web_server.py - 測試基於原生 Socket / uasyncio 的輕量 Web �
 import unittest
 import asyncio
 import json
-import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -15,13 +15,16 @@ class SocketWebServerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         import web_server
         self.web = web_server
-        self.web.load_html()
 
         class MockCommandService:
+            def __init__(self):
+                self.submissions = []
+
             def submit(self, kind, source, value=None):
+                self.submissions.append((kind, source, value))
                 return {'status': 'accepted', 'request_id': 101, 'kind': kind, 'source': source, 'value': value}
             def snapshot(self):
-                return {'available': True, 'mode': 'AUTO', 'desired_color': 7, 'alert_active': False}
+                return {'available': True, 'mode': 'AUTO', 'desired_color': 7, 'alert_active': False, 'active_effect': None}
             def result(self, request_id):
                 if request_id == 101:
                     return {'status': 'completed', 'request_id': 101, 'source': 'web'}
@@ -50,11 +53,63 @@ class SocketWebServerTests(unittest.IsolatedAsyncioTestCase):
         self.web.sensor_snapshot = MockSensorSnapshot()
 
     async def test_get_index_html(self):
-        req = self.web.Request(method='GET', path='/')
-        res = await self.web.app.dispatch_request(req)
-        self.assertEqual(res.status_code, 200)
-        self.assertIn('text/html', res.headers.get('Content-Type', ''))
-        self.assertIn('<!DOCTYPE html>', res.body)
+        for path in ('/', '/index.html'):
+            with self.subTest(path=path):
+                req = self.web.Request(method='GET', path=path)
+                res = await self.web.app.dispatch_request(req)
+                self.assertEqual(res.status_code, 200)
+                self.assertIn(
+                    'text/html', res.headers.get('Content-Type', ''))
+                self.assertFalse(isinstance(res.body, str))
+                chunks = [chunk async for chunk in res.body_iter()]
+                self.assertGreater(len(chunks), 1)
+                self.assertLessEqual(max(map(len, chunks)), 1024)
+                self.assertTrue(b''.join(chunks).startswith(b'<!DOCTYPE html>'))
+
+    async def test_index_stream_never_reads_the_whole_file(self):
+        data = (ROOT / 'index.html').read_bytes()
+
+        class GuardedFile:
+            def __init__(self):
+                self.offset = 0
+                self.read_sizes = []
+                self.closed = False
+
+            def read(self, size=-1):
+                if size < 0:
+                    raise MemoryError('whole-file read forbidden')
+                self.read_sizes.append(size)
+                chunk = data[self.offset:self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+            def close(self):
+                self.closed = True
+
+        class CountingWriter:
+            def __init__(self):
+                self.total = 0
+                self.max_write = 0
+
+            def write(self, chunk):
+                self.total += len(chunk)
+                self.max_write = max(self.max_write, len(chunk))
+
+            async def drain(self):
+                pass
+
+        guarded = GuardedFile()
+        writer = CountingWriter()
+        with patch('builtins.open', return_value=guarded):
+            res = await self.web.app.dispatch_request(
+                self.web.Request(method='GET', path='/'))
+            await self.web.app._write_response(writer, res)
+
+        self.assertTrue(guarded.closed)
+        self.assertTrue(guarded.read_sizes)
+        self.assertEqual(set(guarded.read_sizes), {1024})
+        self.assertLessEqual(writer.max_write, 1024)
+        self.assertGreater(writer.total, len(data))
 
     async def test_get_test_page(self):
         req = self.web.Request(method='GET', path='/test')
@@ -98,11 +153,14 @@ class SocketWebServerTests(unittest.IsolatedAsyncioTestCase):
         missing = object()
         original_trigger = getattr(config, 'LIGHT_ALERT_TRIGGER_ADC', missing)
         original_reset = getattr(config, 'LIGHT_ALERT_RESET_ADC', missing)
+        original_direction = getattr(config, 'LIGHT_DARK_WHEN_HIGH', missing)
         try:
             if original_trigger is not missing:
                 delattr(config, 'LIGHT_ALERT_TRIGGER_ADC')
             if original_reset is not missing:
                 delattr(config, 'LIGHT_ALERT_RESET_ADC')
+            if original_direction is not missing:
+                delattr(config, 'LIGHT_DARK_WHEN_HIGH')
             res = await self.web.app.dispatch_request(
                 self.web.Request(method='GET', path='/api/data'))
             self.assertEqual(res.status_code, 200)
@@ -116,6 +174,8 @@ class SocketWebServerTests(unittest.IsolatedAsyncioTestCase):
                 config.LIGHT_ALERT_TRIGGER_ADC = original_trigger
             if original_reset is not missing:
                 config.LIGHT_ALERT_RESET_ADC = original_reset
+            if original_direction is not missing:
+                config.LIGHT_DARK_WHEN_HIGH = original_direction
 
     async def test_api_led_endpoints(self):
         # Toggle
@@ -130,6 +190,16 @@ class SocketWebServerTests(unittest.IsolatedAsyncioTestCase):
             self.web.Request(method='POST', path='/api/led/commands', body=body_cmd))
         self.assertEqual(res_cmd.status_code, 202)
         cmd_id = json.loads(res_cmd.body)['request_id']
+        body_green = json.dumps({
+            'kind': 'green_flash_alert'
+        }).encode('utf-8')
+        res_green = await self.web.app.dispatch_request(
+            self.web.Request(
+                method='POST', path='/api/led/commands', body=body_green))
+        self.assertEqual(res_green.status_code, 202)
+        self.assertIn(
+            ('green_flash_alert', 'web', None),
+            self.web.command_service.submissions)
 
         # Command result
         res_res = await self.web.app.dispatch_request(

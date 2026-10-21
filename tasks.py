@@ -19,17 +19,20 @@ async def button1_task(button1, command_service, publish_event):
     """
     按鈕 1 監聽任務。
 
-    按鈕只產生命令，不在 adapter 內判斷 LED busy 或操作硬體。
+    按鈕只產生命令，不在 adapter 內操作 LED 硬體。
     """
     button_id = 1
     print(f"[Task] 按鈕 {button_id} 監聽已啟動")
 
     while True:
         try:
-            await button1.wait_press()
+            await button1.wait_press(reject_if=lambda: command_service.busy)
             print(f"[Button] 按鈕 {button_id} 被按下")
-            receipt = command_service.submit('cycle', 'button1')
-            print('[Button] LED 命令:', receipt)
+            if button1.press_rejected:
+                print('[Button] LED 命令未提交: busy')
+            else:
+                receipt = command_service.submit('cycle', 'button1')
+                print('[Button] LED 命令:', receipt)
             await button1.wait_release()
             print(f"[Button] 按鈕 {button_id} 被釋放")
             await uasyncio.sleep_ms(100)
@@ -37,6 +40,29 @@ async def button1_task(button1, command_service, publish_event):
             print(f"[Error] 按鈕 {button_id} 任務異常: {e}")
             await uasyncio.sleep(1)
 
+
+
+async def button3_task(button3, command_service):
+    """按鈕 3 提交固定綠閃效果；忙碌期間的按壓只消耗、不排隊。"""
+    button_id = 3
+    print(f"[Task] 按鈕 {button_id} 監聽已啟動")
+
+    while True:
+        try:
+            await button3.wait_press(reject_if=lambda: command_service.busy)
+            print(f"[Button] 按鈕 {button_id} 被按下")
+            if button3.press_rejected:
+                print('[Button] 綠閃命令未提交: busy')
+            else:
+                receipt = command_service.submit(
+                    'green_flash_alert', 'button3')
+                print('[Button] LED 命令:', receipt)
+            await button3.wait_release()
+            print(f"[Button] 按鈕 {button_id} 被釋放")
+            await uasyncio.sleep_ms(100)
+        except Exception as e:
+            print(f"[Error] 按鈕 {button_id} 任務異常: {e}")
+            await uasyncio.sleep(1)
 
 
 async def button2_task(button2, mqtt_manager, publish_event):
