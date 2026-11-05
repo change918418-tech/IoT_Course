@@ -16,6 +16,72 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261105-047｜納入並校正 uasyncio 教材後保存至 GitHub
+
+- **類別：**需求變更（教學文件與版本保存）。
+- **日期／紀錄時間：**2026-11-05 08:51:00 +08:00，工具取得台北時間；兩份教材原始整理時間依文件記載為2026-10-27 01:15:22 +08:00。
+- **原因：**使用者要求先把目前工作上傳 GitHub。提交前檢查發現兩份 uasyncio 教材、三個 Event 範例與實驗目錄仍未追蹤，且教材仍引用已被原生 Socket 取代的 Microdot、13個應用協程、兩按鈕流程與舊低光門檻；若直接上傳會保存與目前程式不一致的教學內容。
+- **作法：**納入 `UASYNCIO_LECTURE.md`、`UASYNCIO_STUDENT_MANUAL.md`、三個 `asyncio_event_*_demo.py` 與 `uasyncio_experiments/`；教材硬體表明確改為公開 `config.example.py` 基線，加入按鈕3、14個應用協程、ADC高值越暗的2000／1500門檻，以及目前 `SocketApp`／`uasyncio.start_server()` Web 路徑。同步把實機報告的版本文字改為由 Git 歷史查詢同批提交，避免提交後仍聲稱沒有版本。範例與實驗建立、執行及實機驗證細節分別保留在 CHG-20261027-042～045 與 CHG-20261105-046。
+- **影響：**新增教材、可執行桌面範例、十個獨立實驗與實機報告的 Git 追蹤；本次未修改正式 ESP32 執行程式、測試、公開設定或私人 `config.py`。教材腳位表是公開範例，不代表目前裝置的私人接線；實機報告仍明列尚未完成的按鈕、PIR、RFID 與 OLED 驗收。
+- **驗證：**三個 Event 範例及實驗一、八、九均實際執行並正常結束；13個新增 Python 檔案以 `py_compile` 通過。完整桌面測試47項中46項通過；唯一失敗是既有 RFID 測試固定期待公開範例腳位，但本機私人 `config.py` 使用另一組 SPI 腳位，本次未修改該私人設定或測試。以 Mermaid 11.13.0 parser 實際解析兩份教材全部11個 Mermaid 區塊，11/11通過。機密檢查確認 `config.py` 與 `99_All-11-2.py` 仍受 `.gitignore` 排除且未被 Git 追蹤。
+- **部署／回復：**版本保存方式為提交後推送既有 `origin/main`；本紀錄本身不需再次部署 ESP32。若需回復，使用 Git revert 撤回本次提交；不要以公開設定覆蓋裝置私人 `config.py`，裝置上的實驗目錄依 CHG-20261105-046方式另行移除。
+
+
+## CHG-20261105-046｜部署並實機驗證 uasyncio 實驗一至十
+
+- **類別：**需求變更（ESP32 部署與教學實驗驗證）。
+- **日期／驗證完成與紀錄時間：**2026-11-05 00:32:58 +08:00，工具取得台北時間；本次整批作業的精確開始時間未另行記錄。
+- **原因：**使用者要求把已完成的十項作業連同目錄部署到 USB HUB 上的 ESP32，逐項執行、分析並保存結果；另要求對具有介面的程式查詢 ESP32 網路設定並實際驗證 LED 等 HTTP 控制介面。
+- **作法：**在裝置建立 `/uasyncio_experiments/`，部署 README 與十個原名子目錄的 `main.py`，並校驗每個檔案的位元組數與 rolling checksum；同步校驗實驗十使用的 `/assets/uplot/1.6.32/` 三個檔案。每個實驗均在獨立 raw REPL／soft-reset 邊界執行，無限循環實驗以固定觀察窗口停止；實驗六另延長重跑至自然完成，實驗七延長觀察至30秒。實驗十取得 `192.168.137.176/24`、gateway／DNS `192.168.137.1`，使用實際瀏覽器渲染儀表板，並依序驗證 status、snapshot、LED command receipt 與靜態資源。新增 `uasyncio_experiments/ESP32_EXECUTION_REPORT.md` 保存逐項證據、限制、網路設定、API 結果與回復方法，README 增加報告連結；報告不記錄 WiFi SSID、密碼或其他私人設定。
+- **影響：**ESP32 檔案系統可用空間由11,649,024降為11,419,648 bytes；根目錄 `/main.py` 部署前後皆為7,142 bytes、checksum `2191954119`，未被覆蓋。實驗一、五、六、八、九通過既定流程；實驗三通過 OLED 失敗後的序列降級路徑；實驗十通過 Web／snapshot／LED receipt 介面驗證。實驗二未人工按鍵、實驗四未觸發移動、實驗七未讀卡且30秒內未出現十次空輪詢進度，均保留為部分或未完成驗收。
+- **驗證：**11個實驗檔案與3個 Web 資源上傳校驗相符。實驗六自然完成 MQTT connect／subscribe／publish／callback／disconnect；實驗十 `GET /`、`/api/status`、`/api/data`、`/api/led/status` 與兩個 uPlot 資源成功，`POST /api/led/toggle` 回202後再查 request 2 得到 `executed`，LED snapshot 由 output 7／enabled 轉為 output 0／disabled。瀏覽器視覺檢查確認完整儀表板渲染；同時觀察到 favicon 404、兩次 `ECONNRESET`、兩次被中止的 LED status 輪詢及後續 DHT `ETIMEDOUT`，直接 API 驗證仍成功且 DHT 保留上次有效資料。停止實驗後已 soft reboot，序列埠再次觀察到正式程式的 MQTT 發佈／訂閱與 DHT task 輸出。修改的 Markdown 沒有 Mermaid 區塊，無需 Mermaid 11.13.0 解析。
+- **部署／回復：**裝置上的實驗入口為 `/uasyncio_experiments/<實驗目錄>/main.py`；執行前須停止正式 `/main.py`，停止後 soft reboot 恢復正式程式。只移除本次實驗時刪除 `/uasyncio_experiments/`；`/assets/uplot/1.6.32/` 同時供正式 Web 使用，不可在未確認其他呼叫端前刪除。文件回復使用 Git revert 同步移除本紀錄、README 連結與 `ESP32_EXECUTION_REPORT.md`。
+
+
+## CHG-20261027-045｜建立 uasyncio 實驗一至十的獨立程式
+
+- **類別：**需求變更（教學實驗）。
+- **日期／紀錄時間：**2026-10-27 15:25:18 +08:00，工具取得台北時間。
+- **原因：**使用者要求先建立共同資料夾，再把 `UASYNCIO_STUDENT_MANUAL.md` 的實驗一至十分開完成，讓學生可以逐項執行、觀察與驗收，而不必直接改寫正式主程式。
+- **作法：**新增 `uasyncio_experiments/`，內含索引與十個獨立子目錄；依序涵蓋 coroutine 交錯、三按鈕非同步去彈跳、DHT／光感／OLED snapshot、PIR Event 與喇叭、LED 單一 owner receipt、MQTT 發佈訂閱、RFID 非同步輪詢、timeout 與安全清理、task 停止／取消，以及輕量 Socket Web 狀態控制。硬體實驗沿用目前 `hardware/`、`services/`、`communication/` 與 `tasks.py`，不複製第二套 driver；實驗一、八、九提供桌面 CPython fallback。`README.md`記錄環境、依賴、部署邊界與每項驗收結果。本回合只有新增程式與文件，沒有可供修改前備份的原始程式，因此未建立 `mdy_07/`。
+- **影響：**正式 `main.py`、硬體控制、私人 `config.py`、Web API 與部署清單均未修改。實驗二納入目前 GPIO 16 的按鈕三；實驗五、十仍由 `LedController` 唯一寫 RGB GPIO；實驗十刻意不啟動 MQTT，因此 publish API 會回 unavailable。硬體、WiFi、Broker、RFID 與 Web 實驗仍須在相容 ESP32 上個別驗證，桌面結果不可視為實機通過。
+- **驗證：**以桌面 Python 編譯十個 `main.py`，10/10 語法通過；實際執行實驗一，觀察 fast／slow 交錯並正常結束；實際執行實驗八，timeout 與注入例外後皆為 `active=False`；實際執行實驗九，正常停止與取消路徑皆完成 cleanup confirmation。LED、MQTT、PIR、snapshot 與 Socket Web 相關目標測試40/40通過。完整Python測試46/47通過；既有 RFID driver 測試因本機私人 `config.py` 腳位與測試固定期待的公開範例腳位不同而失敗，本次未改私人設定或既有測試。新增與修改的 Markdown 沒有 Mermaid 區塊，不需 Mermaid parser 驗證；尚未執行 ESP32 實機驗證。
+- **部署／回復：**桌面執行實驗一、八、九可依 `uasyncio_experiments/README.md` 使用 `python -B`；ESP32 只執行選定實驗並沿用目前相依模組，不得同時啟動正式 `main.py`，也不得以公開範例覆蓋私人 `config.py`。回復時刪除 `uasyncio_experiments/`，並以 Git revert 同步移除此筆 ChangeLog 紀錄。
+
+
+## CHG-20261027-044｜條列模擬多 producer 的爭搶與覆蓋
+
+- **類別：**需求變更（教學範例）。
+- **日期／紀錄時間：**2026-10-27 14:23:58 +08:00，工具取得台北時間。
+- **原因：**使用者要求條列呈現多個 producer 共用狀態與 `asyncio.Event` 時可能發生的爭搶、覆蓋及其他失敗情境，並以可執行模擬顯示具體結果。
+- **作法：**新增桌面 Python 範例 `asyncio_event_contention_demo.py`，以同步事件控制交錯順序，確定重現四種情境：後寫值覆蓋前值且多次 `set()` 合併、兩個 read-modify-write 遺失一次增量、多欄位在 `await` 期間交錯而形成混合快照，以及 producer 在通知前失敗使 consumer 等待逾時。輸出末尾條列對應的單一 owner、`asyncio.Queue`、`asyncio.Lock` 與 timeout 建議。本回合只有新增程式，沒有可供修改前備份的原始檔，因此未建立 `mdy_07/`。
+- **影響：**不修改 ESP32 主程式、硬體控制、設定、測試或部署清單；範例說明 `Event` 只負責通知，不能提供計數、資料保存或共享狀態互斥。
+- **驗證：**執行 `python -B asyncio_event_contention_demo.py`，實際得到最後值 B/200、預期 2 但實際 1 的遺失更新、writer B 搭配 value 100 的混合狀態，以及 producer 錯誤後 consumer 逾時等四項結果，程序正常結束。修改內容沒有 Mermaid 區塊，不需 Mermaid parser 驗證。
+- **部署／回復：**在專案根目錄執行 `python -B asyncio_event_contention_demo.py` 即可觀看示範，不需上傳 ESP32。回復時刪除該範例，並以 Git revert 同步移除此筆 ChangeLog 紀錄。
+
+
+## CHG-20261027-043｜新增 asyncio.Event 雙寫入者覆蓋模擬
+
+- **類別：**需求變更（教學範例）。
+- **日期／紀錄時間：**2026-10-27 14:15:37 +08:00，工具取得台北時間。
+- **原因：**使用者要求延伸單一 producer 範例，加入兩個寫入者共用同一份狀態與 `asyncio.Event` 的情境，具體呈現後寫入值覆蓋前值以及 Event 不累計通知次數的限制。
+- **作法：**新增桌面 Python 範例 `asyncio_event_two_writers_demo.py`；寫入者 A 與 B 分別在 0.2、0.4 秒後把 100、200 寫入同一份 `state`，兩者都呼叫 `event.set()`。consumer 刻意在兩個寫入者完成後才處理，以可重現方式顯示 Event 仍只有已設定狀態，且共享資料只保留寫入者 B 的最後值 200。
+- **影響：**只新增獨立教學程式，不修改 ESP32 主程式、硬體控制、設定、測試或部署清單。此範例示範需要保留每筆資料時不能以單一共享值加 Event 取代佇列。
+- **驗證：**執行 `python -B asyncio_event_two_writers_demo.py`，實際看到 A 與 B 設定事件時 `event.is_set()` 都為 `True`，consumer 最後只讀到 `writer=寫入者 B, value=200`，程序正常結束。修改內容沒有 Mermaid 區塊，不需 Mermaid parser 驗證。
+- **部署／回復：**在專案根目錄執行 `python -B asyncio_event_two_writers_demo.py` 即可觀看示範，不需上傳 ESP32。回復時刪除該範例，並以 Git revert 同步移除此筆 ChangeLog 紀錄。
+
+
+## CHG-20261027-042｜新增 asyncio.Event 生產者／消費者模擬
+
+- **類別：**需求變更（教學範例）。
+- **日期／紀錄時間：**2026-10-27 14:10:16 +08:00，工具取得台北時間。
+- **原因：**使用者要求以可執行的小程式說明共享狀態搭配 `asyncio.Event` 的用途，讓等待、通知、清除事件與取用資料的先後關係可以直接從終端輸出觀察。
+- **作法：**新增桌面 Python 範例 `asyncio_event_demo.py`；consumer 先以 `await event.wait()` 等待，producer 延遲一秒模擬感測器讀取，將數值 42 寫入共享 `state` 後呼叫 `event.set()`，consumer 被喚醒後呼叫 `event.clear()` 並使用該數值。範例刻意維持單次通知，避免把 `Event` 誤示範成逐筆資料佇列。
+- **影響：**只新增獨立教學程式，不修改 ESP32 主程式、硬體控制、設定、測試或部署清單；範例使用桌面 CPython 的 `asyncio`，ESP32 主程式仍使用 `uasyncio`。
+- **驗證：**執行 `python -B asyncio_event_demo.py`，實際輸出依序顯示 consumer 等待、producer 寫入 42 並通知、consumer 清除事件及使用 42，程序正常結束。兩份修改檔案均無 Mermaid 區塊，不需 Mermaid parser 驗證。
+- **部署／回復：**在專案根目錄執行 `python -B asyncio_event_demo.py` 即可觀看示範，不需上傳 ESP32。回復時刪除 `asyncio_event_demo.py`，並以 Git revert 同步移除此筆 ChangeLog 紀錄。
+
+
 ## CHG-20261021-041｜保存首頁記憶體事件證據與防回歸規則
 
 - **類別：**需求變更（記憶體治理文件）。
