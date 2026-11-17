@@ -4,7 +4,7 @@
 
 本講義的範圍是四種需求共同使用一個 RGB LED：
 
-1. 實體按鈕 1 要求 LED 換下一個顏色。
+1. 實體按鈕 1 短按要求換下一個顏色；長按則沿相同順序持續換色到放開。
 2. 網頁按鈕 1 要求 LED 換下一個顏色。
 3. 光線太暗時，系統要求 LED 紅色閃爍五次，完成後回到原本狀態。
 4. 實體或網頁按鈕 3 要求 LED 綠色閃爍三次，完成後回到原本狀態。
@@ -30,7 +30,7 @@ MQTT 的 `set_color` 現在也經由 `MqttManager` 的同步 callback bridge 送
 
 | 提出要求的人 | 他想做什麼 | 這是短動作還是暫時效果？ |
 |---|---|---|
-| 實體按鈕 1 | 換到下一個顏色 | 短動作 |
+| 實體按鈕 1 | 短按換下一色；長按持續依序換色 | 短動作或按住期間重複 |
 | 網頁按鈕 1 | 換到下一個顏色 | 短動作 |
 | 光照感測器 | 太暗時紅閃五次 | 暫時效果，結束後要恢復 |
 | 實體／網頁按鈕 3 | 綠閃三次 | 暫時效果，結束後要恢復 |
@@ -216,7 +216,7 @@ flowchart TD
 
 **比喻：**門鈴被按住，不代表每一毫秒都有人按了一次；而且效果中按下的要求不能因為後來效果結束就偷偷變成新要求。
 
-**程式：**`Button` 先確認穩定按下；`button1_task` 與 `button3_task` 在去彈跳期間以 `CommandService.busy` 記住拒絕狀態，忙碌時不提交命令，並等待放開後才回到下一次按下。
+**程式：**`Button` 先確認穩定按下；`button1_task` 以800 ms區分短按與長按，長按期間每300 ms提交一次`cycle`，放開立即停止。`button1_task`與`button3_task`都以`CommandService.busy`記住本次按壓的拒絕狀態，忙碌按壓只消耗到放開，不在效果結束後補送。
 
 **解決什麼：**防止按鈕抖動與「效果中按住，效果結束後自動補執行」的錯誤。
 
@@ -480,10 +480,11 @@ sequenceDiagram
     participant Led as RgbLed與GPIO
     Button->>Input: await wait_press
     Input-->>Button: 穩定按下
+    Button->>Input: wait_release, timeout 800 ms
+    Input-->>Button: 期限前釋放
     Button->>Entry: submit cycle, button1
     Entry->>Entry: receipt10加入results與queue
     Entry-->>Button: 副本accepted
-    Button->>Input: await wait_release
     Owner->>Owner: _step取命令10
     Owner->>Owner: _apply計算色碼 1加1模8等於2
     Owner->>Led: write 2 綠色
@@ -492,15 +493,16 @@ sequenceDiagram
 
 | 步驟 | 哪個程式在執行？ | 呼叫／資料變化 | 是否碰GPIO？ |
 |---|---|---|---|
-| 1 | tasks.button1_task | await button1.wait_press；按下後提交 `CommandService.submit('cycle', 'button1')` | 只讀按鈕GPIO |
-| 2 | hardware.button | 依 `BUTTON_DEBOUNCE_MS` 穩定判定按下／釋放；不預先取得LED控制權 | 只讀按鈕GPIO |
-| 3 | button1_task→submit | kind='cycle'、source='button1'、value預設None | 不碰LED |
-| 4 | submit | 建receipt10，queue=[cycle10]，回accepted副本 | 不碰LED |
-| 5 | owner.run→_step | pop最早命令，_apply推進1→2，enabled=true | 尚未 |
-| 6 | owner→RgbLed.write(2) | 2的三個位元為010，寫R=0、G=1、B=0 | 是，唯一owner |
-| 7 | owner | receipt10.status='executed'，queue空 | 無新寫入 |
+| 1 | tasks.button1_task | `await button1.wait_press()`，進入短按候選 | 只讀按鈕GPIO |
+| 2 | hardware.button | 依`BUTTON_DEBOUNCE_MS`穩定判定按下；不預先取得LED控制權 | 只讀按鈕GPIO |
+| 3 | button1_task→hardware.button | `wait_release(timeout_ms=800)`在期限前回傳`True` | 只讀按鈕GPIO |
+| 4 | button1_task→submit | kind='cycle'、source='button1'、value預設None | 不碰LED |
+| 5 | submit | 建receipt10，queue=[cycle10]，回accepted副本 | 不碰LED |
+| 6 | owner.run→_step | pop最早命令，_apply推進1→2，enabled=true | 尚未 |
+| 7 | owner→RgbLed.write(2) | 2的三個位元為010，寫R=0、G=1、B=0 | 是，唯一owner |
+| 8 | owner | receipt10.status='executed'，queue空 | 無新寫入 |
 
-按鈕task等待放開，不是在等LED命令完成。owner与按鈕task都在各自await處讓出排程。图中的wait_release開始後owner執行是一種可能順序；按鈕也可能更早放開，不影響命令已經受理。
+短按的`wait_release`是在分類手勢，不是在等LED命令完成；短按命令只在釋放後提交。若800 ms仍未釋放，task改為長按狀態，立即提交一次cycle，之後每300 ms仍按住就再提交；釋放只停止重複，不補短按命令。owner與按鈕task仍只在各自的`await`處讓出排程。
 
 | 時點 | queue | 正常色碼 | LED輸出 | receipt10 |
 |---|---|---|---|---|
@@ -645,13 +647,11 @@ sequenceDiagram
     participant Owner as owner
     Light->>Entry: 受理警示10
     Entry->>Entry: reserved=true
-    Button->>Button: wait_press完成穩定去彈跳
-    Button->>Entry: submit cycle, button1
-    Entry-->>Button: rejected，reason=busy
-    Button->>Button: await wait_release，不排隊
+    Button->>Button: wait_press完成，press_rejected=true
+    Button->>Button: 等待釋放，不提交cycle
 ```
 
-這條路徑會產生一筆被拒絕的按鈕 receipt，因為來源在按下後仍會提交 cycle，而共同命令入口的 busy 檢查是最後權威。如果來源先提交、警示才開始，警示也會把尚未執行的普通 receipt 改為 `rejected / alert_started`。兩條拒絕路徑都不寫 GPIO，也不排隊。
+這條路徑不產生按鈕 receipt：`Button.wait_press(reject_if=...)`在去彈跳時已記住busy，`button1_task`只消耗本次按壓直到放開。若按鈕來源先提交、警示才開始，警示仍會把尚未執行的普通 receipt 改為`rejected / alert_started`；若busy只在最終`CommandService.submit()`前出現，控制器的busy檢查仍會拒絕。這些路徑都不寫第二份GPIO流程，也不把按住動作延後到警示結束。
 
 **課堂總結：同時到達不一定結果相同，但每個結果都可由受理與執行的先後順序解釋。**
 
@@ -664,32 +664,29 @@ sequenceDiagram
     participant Owner as owner
     participant Input as Button物件
     participant Button as button1_task
-    participant Entry as CommandService
     Owner->>Owner: 第3次紅亮且busy=true
     Button->>Input: await wait_press
-    Input-->>Button: 穩定按下
-    Button->>Entry: CommandService.submit cycle
-    Entry-->>Button: rejected，reason=busy
-    Button->>Input: await wait_release
+    Input-->>Button: 穩定按下且press_rejected=true
+    Button->>Input: wait_release, timeout 800 ms
     Owner->>Owner: 完成第4與第5次並恢復藍1
-    Note over Button,Input: 仍按住不產生新命令
+    Note over Button,Input: 跨過期限仍不提交，繼續等放開
     Input-->>Button: 使用者放開
     Button->>Input: 下一輪等待重新按下
 ```
 
-1. `button1_task`等待穩定按下後呼叫`CommandService.submit('cycle', 'button1')`；`LedController`在警示預約或執行中會回覆`rejected / busy`。
-2. `button1_task`記錄受理結果並等待放開；被拒絕的按下不建立延後命令，queue不新增資料，正常色碼不變。
-3. 即使按住到警示結束，也不因busy解除而補提交；必須放開後重新按下。
-4. 非忙碌時重新按下，命令才會被CommandService接受，owner之後把藍1變綠2。
+1. `button1_task`等待穩定按下；`Button`在初始讀取與去彈跳期間看見`CommandService.busy`，將`press_rejected`記為`True`。
+2. task不提交`cycle`，只等待本次按壓放開；即使跨過800 ms與警示完成，拒絕狀態仍不清除。
+3. 放開後本次手勢結束，沒有queue項目、receipt或補送命令；必須重新按下。
+4. 非忙碌時重新短按並放開，命令才會被`CommandService`接受，owner之後把藍1變綠2。
 
 | 階段 | 按鈕 | busy | 是否有新cycle | LED |
 |---|---|---|---|---|
 | 第3次紅閃 | 按下 | true | 沒有 | 繼續紅／滅 |
 | 警示恢復 | 仍按住 | false | 沒有 | 藍1 |
 | 放開 | 釋放 | false | 沒有 | 藍1 |
-| 重新按下 | 新按下 | false | accepted，等待owner | 隨後綠2 |
+| 重新短按並放開 | 新手勢 | false | accepted，等待owner | 隨後綠2 |
 
-去彈跳接近結束時警示剛好完成，這次按下仍依 submit 當下的 busy 結果處理，不會因稍後 busy=false 而補提交；放開後必須重新按下。這是輸入生命週期政策，不是單靠 owner 佇列就能自動完成。
+若busy在去彈跳接近結束時剛好解除，`press_rejected`仍保留本次曾忙碌的事實，不會改在長按期限或放開後補提交；放開後必須重新按下。這是輸入生命週期政策，不是單靠owner佇列就能自動完成。
 
 ## 8. 把同樣規則套到網頁按鈕
 
@@ -985,7 +982,7 @@ flowchart LR
 | 檔案／函式 | 工作 |
 |---|---|
 | main.main | 建立LedController、CommandService、create_task(run)，注入Web並傳給生產者 |
-| tasks.button1_task | 讀按鈕、去彈跳、提交cycle，等待放開；忙碌時由共同命令入口回覆拒絕 |
+| tasks.button1_task | 讀按鈕、去彈跳，以800 ms區分短按與長按；短按提交一次cycle，長按每300 ms提交cycle，放開／取消即停止 |
 | tasks.button3_task | 讀按鈕3、去彈跳、忙碌按壓消耗、空閒時提交green_flash_alert並等待放開 |
 | tasks.light_sensor_task | 50 ms取樣，管理armed與裝置設定的遲滯，提交警示 |
 | services.command_service.CommandService.submit | 產生request ID並轉交LedController，不碰GPIO |

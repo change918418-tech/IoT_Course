@@ -16,6 +16,50 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261108-051｜完成綜合題 A 提交內容與課後反思
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-11-08 23:27:07 +08:00，工具取得台北時間。
+- **原因：**使用者已完成 `UASYNCIO_STUDENT_MANUAL.md` 的綜合實作題 A，要求接續完成第 16 節「綜合題提交格式」與第 19 節「課後反思」，使手冊不只保留空白格式與問題，也保存本次長按按鈕實作的設計、驗證邊界及完整反思答案。
+- **作法：**在第 16 節新增題目 A 的實際提交，逐項記錄問題定義、GPIO 與時間設定、task／driver 分工、await 邊界、Queue 選擇、LED single owner、busy／timeout／取消政策、桌面結果、實機限制及回復方式；另加入 Mermaid 任務流程圖、修改前後差異，以及短按、長按、busy、800 ms 同時釋放與取消案例。第 19 節新增十題反思回答，涵蓋事件迴圈、非同步與平行的差異、callback 邊界、single owner、Event／Queue、SensorSnapshot 欄位、PIR 顯示與重新武裝責任、HTTP 202、實機證據及新功能歸責。答案依目前 `tasks.py`、`hardware/button.py`、`services/command_service.py`、`services/led_controller.py`、`services/sensor_snapshot.py`、公開設定、測試與 CHG-20261107-050 的既有證據整理；沒有改動程式或設定。
+- **影響：**學生可直接提交已完成的題目 A 設計與桌面證據，並取得十題具體反思答案；文件明確保留 ESP32 實體按鍵、800／300 ms 手感、真實 GPIO 與負載排程尚未驗證的限制，不把 fake GPIO 結果冒充實機通過。本次只修改學生手冊與本紀錄，不影響 ESP32 執行、私人 `config.py` 或部署內容。
+- **驗證：**執行 `python -B -m unittest tests.test_button tests.test_led_owner -v`，20 項全部通過，涵蓋本次文件描述的釋放／逾時、短按、長按、busy、取消、single owner 與 receipt 行為；`git diff --check -- UASYNCIO_STUDENT_MANUAL.md` 通過。使用 Mermaid 11.13.0 parser 實際解析手冊全部 5 個 Mermaid 區塊，5/5 通過。未重跑完整桌面測試，也未執行 ESP32 實機驗證。
+- **部署／回復：**文件不需部署到 ESP32；提交後以 Git 同步手冊與本紀錄。回復時以 Git revert 同步移除第 16.1、19.1 節與本筆紀錄，不回復或覆蓋已完成的題目 A 程式、測試、`mdy_07/` 或私人設定。
+
+
+## CHG-20261107-050｜實作按鈕 1 短按單次與長按連續換色
+
+- **類別：**需求變更（按鈕手勢與 LED 換色規則）。
+- **日期／紀錄時間：**2026-11-07 00:50:43 +08:00，工具取得台北時間。
+- **原因：**使用者要求保留按鈕 1 原有短按跳下一色，並新增「按住時依既有0→1→…→7→0順序持續換色，直到放開」；同時要求說明長按狀態與時間、不得把LED業務政策寫進硬體driver、所有換色由`CommandService`提交，且必須處理取消與釋放邊界。
+- **作法：**`hardware/button.py`將`wait_release()`擴充為可選`timeout_ms`／`reject_if`的通用輸入等待：釋放回`True`、持續按住到期限回`False`，同一輪同時可見釋放與期限時釋放優先；driver只處理GPIO與`is_pressed`／`press_rejected`，不知道LED色碼。`tasks.button1_task`維護`long_press_active`：穩定按下後800 ms內放開只提交一次`CommandService.submit('cycle', 'button1')`；達800 ms仍按住時立即提交一次，之後每300 ms仍按住再提交，放開不補短按。busy在同一次按壓期間採sticky拒絕，取消則重新拋出`CancelledError`，且沒有另建背景timer。新增公開與私人非機密時間設定、driver邊界測試及task短按／長按／busy／取消測試；同步更新架構、講義、學生手冊與單一owner講義。
+- **輪次備份：**在本回合第一次程式內容修改前建立`mdy_07/`，保存`hardware/button.py`、`tasks.py`、`config.example.py`與`tests/test_led_owner.py`的修改前版本；新增的`tests/test_button.py`沒有舊版可備份。未備份或公開私人`config.py`，`mdy_07/`不得部署ESP32。
+- **影響：**短按的結果仍是下一色一次，但命令時點由「穩定按下後立即提交」改為「800 ms內放開後提交」，以便和長按互斥。長按從門檻當下開始換色，之後名義週期300 ms；實際GPIO套用仍受30 ms按鈕輪詢、20 ms owner frame與其他協程排程影響。釋放或取消只停止後續重複提交，已由`CommandService`受理的命令仍由owner執行，不做隱含撤回。按鈕task、Web、MQTT與光感仍共用同一個`CommandService`／`LedController`，沒有在`hardware.button`或LED driver新增業務命令，也沒有新增常駐task。
+- **驗證：**按鈕與owner目標測試20項全部通過，涵蓋800 ms釋放優先、持續按住逾時、取消後保留已受理命令但停止後續重複、短按單次、長按重複、放開不補短按及busy後停止重複。完整`python -B -m unittest discover -s tests -v`執行54項，53項通過；唯一失敗仍是既有`test_driver_protocol_and_full_sample_format`固定期待公開RFID腳位，但本機私人`config.py`使用另一組腳位，與本次按鈕修改無關。指定Python檔案`py_compile`通過。實際task／`CommandService`／`LedController`桌面smoke觀察：短按提交1筆並輸出`[0]`，模擬長按兩個節拍提交2筆並輸出`[0, 1]`，在首筆長按命令前取消為`cancelled=True`且提交0筆。Mermaid 11.13.0實際解析本次工作樹六份修改Markdown共33個圖表區塊，33/33通過。尚未在ESP32實體按鈕上量測去彈跳、800／300 ms體感與GPIO輸出。
+- **部署／回復：**部署`hardware/button.py`、`tasks.py`及保留私人WiFi資料的`config.py`後重啟ESP32；測試與Markdown不需上傳，`mdy_07/`不得部署。回復時以`mdy_07/`對應檔案還原程式／公開設定／舊測試，移除新增`tests/test_button.py`，並從私人`config.py`移除`BUTTON_LONG_PRESS_MS`與`BUTTON_LONG_REPEAT_MS`；不得以公開`config.example.py`覆蓋私人WiFi profiles。
+
+
+## CHG-20261106-049｜修正實驗三 OLED I2C 腳位並完成 ESP32 重跑
+
+- **類別：**BUG。
+- **日期／紀錄時間：**2026-11-06 00:12:16 +08:00，工具取得台北時間。
+- **原因：**實驗三在 ESP32-S3 初始化 OLED 時回報 `ETIMEDOUT`，但使用者已確認根目錄未追蹤的 `wifi.py` 可正常驅動同一片 OLED。比對後確認可用程式使用 I2C 0、SCL 39、SDA 40，而 `hardware/display.py` 硬編碼 SCL 7、SDA 5；對舊腳位的實機 I2C 掃描也沒有找到裝置。
+- **作法：**將 `hardware/display.py` 改為讀取 `config.py` 的 I2C controller、SCL、SDA、頻率與尺寸；把公開 `config.example.py` 基線更新為 SCL 39、SDA 40、400 kHz，並只在既有私人 `config.py` 補上非機密頻率設定，未改動 WiFi profiles。同步修正 `SYSTEM_ARCHITECTURE.md`、`UASYNCIO_LECTURE.md`、`UASYNCIO_STUDENT_MANUAL.md` 與 `uasyncio_experiments/ESP32_EXECUTION_REPORT.md` 的接線、架構及實測結果；歷史備份目錄 `mdy_02/`～`mdy_04/` 與獨立 `99_All-11-2.example.py` 未改動。
+- **影響：**正式 OLED 驅動不再忽略設定檔，實驗三會依目前 ESP32-S3 接線初始化 SSD1306。`wifi.py` 仍為未追蹤且未忽略的本機檔案，其中含私人 WiFi 憑證，本次沒有修改、納入版本或複製其機密。其他感測、LED、RFID、Web 與 MQTT 邏輯未變更。
+- **驗證：**`python -B -m py_compile hardware/display.py config.example.py uasyncio_experiments/03_sensor_snapshot_periods/main.py` 通過。完整桌面測試執行47項，46項通過；唯一失敗仍是 `test_driver_protocol_and_full_sample_format` 固定期待公開 RFID 腳位，但私人 `config.py` 使用另一組腳位，與本次 OLED 修改無關。以 Mermaid 11.13.0 parser 實際解析 `SYSTEM_ARCHITECTURE.md` 1/1、`UASYNCIO_LECTURE.md` 7/7、`UASYNCIO_STUDENT_MANUAL.md` 4/4；實機報告沒有 Mermaid 區塊。ESP32 `COM9` 部署更新後，OLED 初始化回報 SCL 39／SDA 40，I2C 掃描找到 `0x3C`，`show_two_lines()` 完成；實驗三以6秒窗口重跑，DHT、光感與每秒 snapshot 持續更新且沒有 OLED 例外。測試控制的 `wait_for` 在窗口結束時產生預期 `TimeoutError`，隨後 reset 恢復根目錄正式程式。已驗證 I2C 回應及顯示寫入，未以攝影畫面核對實體像素。
+- **部署／回復：**已將更新後的 `hardware/display.py` 上傳到 ESP32 `/hardware/display.py`；裝置私人 `config.py` 既有 SCL 39／SDA 40 可直接使用，缺少頻率欄位時驅動以400 kHz為預設。回復時以 Git revert 還原追蹤檔案，並將前一版 `hardware/display.py` 重新上傳；不要以 `config.example.py` 覆蓋裝置或本機私人 `config.py`。
+
+## CHG-20261105-048｜完成 uasyncio 十項實驗參考回答
+
+- **類別：**需求變更（教學文件）。
+- **日期／紀錄時間：**2026-11-05 08:59:24 +08:00，工具取得台北時間。
+- **原因：**使用者要求依先前完成的十項實驗、程式分析與 ESP32 執行結果，在 `UASYNCIO_STUDENT_MANUAL.md` 補上十項作業回答，而不是只保留操作題目與空白觀察欄。
+- **作法：**在手冊新增「附錄 A：實驗一至十參考回答與實測結果」，逐項回答 coroutine 交錯、三按鈕去彈跳、SensorSnapshot、PIR Event、LED single owner、MQTT、RFID、timeout、task cancellation 與 Socket Web 的題目。每項都分開標示程式可判定的設計答案、2026-11-05 實際觀察與未驗證限制；數值與狀態取自 `uasyncio_experiments/ESP32_EXECUTION_REPORT.md`，實作語意再以目前 `tasks.py`、`services/sensor_snapshot.py`、`hardware/rfid.py`、`lib/mfrc522_async.py` 與 `web_server.py` 核對。
+- **影響：**學生可直接對照十項題目、參考答案與實機證據；實驗二、四、七及 OLED、MQTT 失敗注入等未完成項目仍明確標示，沒有把靜態分析、FakeActuator／FakeOutput 或預期行為冒充 ESP32 實測。本次只修改文件，不變更正式程式、設定、測試或裝置部署。
+- **驗證：**確認附錄含 A.1～A.10 共十節；1.800、6.144、8.113、2.997、22.778、30.096、0.536、0.920 秒、感測值、IP、HTTP 狀態與 request ID 均與既有實機報告逐項核對。`git diff --check` 無差異錯誤；以 Mermaid 11.13.0 parser 解析手冊全部4個 Mermaid 區塊，4/4通過。本次未重跑 ESP32，文件中的實測結果引用 CHG-20261105-046 已保存的執行證據。
+- **部署／回復：**文件不需上傳 ESP32；提交後由 Git 版本同步教學手冊與本紀錄。回復時以 Git revert 同步移除附錄與本筆 ChangeLog，不影響裝置上的十個實驗程式。
+
+
 ## CHG-20261105-047｜納入並校正 uasyncio 教材後保存至 GitHub
 
 - **類別：**需求變更（教學文件與版本保存）。

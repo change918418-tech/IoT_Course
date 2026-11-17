@@ -34,14 +34,14 @@
 | 元件 | 腳位／介面 | 在非同步系統中的角色 |
 |---|---|---|
 | RGB LED | R=`GPIO 37`、G=`GPIO 35`、B=`GPIO 33` | `LedController.run()` 唯一寫入者 |
-| 按鈕 1 | `GPIO 17` | 等待穩定按下，提交 LED `cycle` 命令 |
+| 按鈕 1 | `GPIO 17` | 短按提交一次 LED `cycle`；長按每 300 ms 重複到放開 |
 | 按鈕 2 | `GPIO 21` | 等待穩定按下，設定 MQTT 發佈事件 |
 | 按鈕 3 | `GPIO 16` | 等待穩定按下，提交 LED 綠閃命令 |
 | DHT11 | `GPIO 18` | 每 2 秒讀取溫度與濕度 |
 | TEMT 光感測器 | ADC `GPIO 8` | 每 50 ms 取樣，更新 snapshot 並判斷低光 |
 | PIR | `GPIO 4` | 每 100 ms 取樣，穩定高電位後觸發一次 |
 | 無源喇叭 | PWM `GPIO 6` | 等待 PIR event，非同步播放旋律 |
-| OLED | I2C 0；SCL=`GPIO 7`、SDA=`GPIO 5`；128×64 | 每 1 秒讀 snapshot 後更新畫面 |
+| OLED | I2C 0；SCL=`GPIO 39`、SDA=`GPIO 40`；128×64 | 每 1 秒讀 snapshot 後更新畫面 |
 | RFID MFRC522 | SPI：SCK=`12`、MOSI=`11`、MISO=`10`、RST=`9`、CS=`13` | 每 500 ms 輪詢，非同步等待卡片回應 |
 
 目前專案沒有在程式與設定中明確指定 ESP32 開發板變體。公開基線的 GPIO 37、35、33、8 等腳位是否可用，必須依實際開發板、封裝與接線確認；教材不把靜態設定表當成電氣驗證證據。
@@ -591,26 +591,41 @@ HTTP `202` 或 receipt 的 `accepted` 只表示命令進入受理邊界，不表
 `hardware/button.py` 的 `Button` 提供：
 
 - `wait_press()`：等待低電位並進行非同步去彈跳。
-- `wait_release()`：等待回到釋放狀態。
+- `wait_release(timeout_ms=None, reject_if=None)`：等待回到釋放狀態；有期限時，釋放回傳 `True`，仍按住至期限回傳 `False`。同一次取樣同時看見釋放與期限時，釋放優先。
 - `debounce_read()`：以 1 ms 取樣，要求穩定狀態持續設定時間。
 
-目前 `tasks.py` 的按鈕任務結構：
+按鈕 1 的手勢狀態分成「等待按下」、「短按候選」與「長按重複」：
+
+- `Button.is_pressed` 保存 driver 已確認的按壓狀態；`press_rejected` 記住本次按壓期間是否看見 LED busy。
+- `button1_task.long_press_active` 只屬於本次手勢，不放進 driver。
+- 穩定按下後從零開始等待 `BUTTON_LONG_PRESS_MS = 800` ms。期限前放開是短按，只提交一次 `cycle`。
+- 800 ms 仍按住便進入長按，立即提交第一次 `cycle`；之後每 `BUTTON_LONG_REPEAT_MS = 300` ms 仍按住就再提交一次。
+- 長按放開只結束重複，不再補一筆短按命令。若 busy 在本次按壓期間出現，`press_rejected` 維持到放開，避免效果結束後補送。
 
 ```mermaid
 sequenceDiagram
-    participant ButtonTask as ButtonTask
+    participant ButtonTask as button1_task
     participant Driver as Button
     participant Command as CommandService
     participant Owner as LedController
     ButtonTask->>Driver: await wait_press()
     Driver-->>ButtonTask: stable press
-    ButtonTask->>Command: submit command
-    Command->>Owner: normalized request
-    ButtonTask->>Driver: await wait_release()
-    Driver-->>ButtonTask: released
+    ButtonTask->>Driver: wait_release(timeout_ms=800)
+    alt 800 ms 內放開
+        Driver-->>ButtonTask: released=true
+        ButtonTask->>Command: submit cycle
+        Command->>Owner: normalized request
+    else 800 ms 後仍按住
+        Driver-->>ButtonTask: released=false
+        loop 每 300 ms，直到放開
+            ButtonTask->>Command: submit cycle
+            Command->>Owner: normalized request
+            ButtonTask->>Driver: wait_release(timeout_ms=300)
+        end
+    end
 ```
 
-按鈕 task 不直接寫 LED，也不在硬體 adapter 中決定 Web 或 MQTT 政策。
+LED 的「短按換一次色、長按連續換色」政策在 `tasks.py`；driver 只回答輸入是否釋放或逾時，不知道 LED、色碼或 `CommandService`。實作沒有建立背景 timer task，因此取消 `button1_task` 會直接傳播 `CancelledError`，不會留下稍後補送命令的工作；`wait_release()` 的 `finally` 只在 GPIO 已釋放時清除 `is_pressed`。取消或放開只停止後續重複，已由`CommandService`受理的命令仍交給owner執行，不做隱含撤回。
 
 ### 13.1 不能只讀一次 GPIO
 
@@ -618,7 +633,7 @@ sequenceDiagram
 
 ### 13.2 單擊、雙擊、長按的延伸
 
-既有 `ESP32上無源按鈕的asyncio版本.md` 展示了以 task 延後判斷單擊、並區分雙擊與長按的概念。該範例適合作為延伸教材，但不能直接當成目前主流程已部署的完整手勢 dispatcher；目前主流程仍是 `wait_press()`、執行一次動作、`wait_release()`。
+目前正式流程已實作按鈕 1 的短按／長按重複換色，但未加入雙擊。既有 `ESP32上無源按鈕的asyncio版本.md` 仍是完整單擊、雙擊、長按 callback dispatcher 的延伸教材；它不是目前正式程式的直接依賴。
 
 ---
 
@@ -972,7 +987,7 @@ CommandService.submit()
 
 ### 不應誤稱為目前已完成
 
-- 完整按鈕單擊／雙擊／長按 dispatcher。
+- 按鈕雙擊與可重用的通用手勢 dispatcher。
 - MQTT 重連後完整重新訂閱驗證。
 - 真 Broker 與外部訂閱者端到端驗證。
 - 所有 GPIO、ADC、SPI、I2C 電氣與時序的 ESP32 實機驗證。

@@ -56,7 +56,7 @@
 | TEMT 光感 | ADC GPIO 8 | 確認輸出電壓不超過 ADC 允許範圍 |
 | PIR | GPIO 4 | 確認輸出高低電位與預熱狀態 |
 | 無源喇叭 | PWM GPIO 6 | 確認不要直接超載 GPIO，依課堂電路接法使用 |
-| OLED | I2C 0，SCL=7、SDA=5 | 確認電源電壓與共地 |
+| OLED | I2C 0，SCL=39、SDA=40 | 確認電源電壓與共地 |
 | RFID MFRC522 | SCK=12、MOSI=11、MISO=10、RST=9、CS=13 | 確認模組電壓與 SPI 接線 |
 
 ### 1.3 不要分享機密
@@ -253,8 +253,10 @@ main.py
     → Button(config.BUTTON1_PIN)
     → tasks.button1_task()
     → await button1.wait_press()
-    → CommandService.submit('cycle', 'button1')
-    → await button1.wait_release()
+    → await button1.wait_release(timeout_ms=800)
+        ├─ 800 ms 內放開：CommandService.submit('cycle', 'button1') 一次
+        └─ 仍按住：立即提交一次，之後每 300 ms 仍按住再提交
+    → 放開或 task 取消：停止本次手勢，不補送命令
 ```
 
 按鈕 2 的路徑是：
@@ -284,8 +286,8 @@ main.py
 1. 依實機 `config.py` 確認按鈕 1、2、3 的 GPIO；公開範例分別是 17、21、16。
 2. 部署主流程與正確 `config.py`。
 3. 開機後觀察序列埠。
-4. 按一下按鈕 1，記錄 LED 命令 receipt。
-5. 放開按鈕 1，確認下一次按下前不會因持續低電位一直提交新命令。
+4. 短按並放開按鈕 1，確認只產生一筆 LED `cycle` receipt。
+5. 按住按鈕 1 超過800 ms，確認先換下一色，之後每300 ms持續依序換色，放開後不再新增命令。
 6. 按一下按鈕 2，記錄 MQTT 發佈請求狀態。
 7. 按一下按鈕 3，記錄綠閃命令 receipt；效果期間的新 LED 命令應依 busy 政策處理。
 8. 同時觀察 PIR、OLED 或 Web 狀態是否仍更新。
@@ -467,8 +469,8 @@ flowchart LR
 2. 由按鈕 1 提交數次 `cycle`。
 3. 由 Web POST `/api/led/toggle` 提交一次換色。
 4. 在光線低於目前 trigger threshold 時觀察低光警示。
-5. 警示期間嘗試按按鈕 1。
-6. 記錄按鈕命令的 receipt：
+5. 警示期間嘗試按按鈕 1；這次按壓應只消耗到放開，不產生 receipt。
+6. 警示結束後重新短按並放開，記錄新命令的 receipt：
    - `status`
    - `reason`
    - `request_id`
@@ -842,6 +844,14 @@ config.py 非機密設定摘要：
 - 由 `CommandService` 提交命令。
 - 實作取消與按鈕釋放邊界。
 
+目前專案的參考實作採用以下規則：
+
+- 狀態為 `press_rejected`（本次按壓曾遇到 busy）與 `long_press_active`（是否已跨過長按門檻）。
+- 從穩定按下後計時 800 ms；期限前放開只切換下一色一次。
+- 達 800 ms 仍按住時切換下一色，之後每 300 ms 依 0→1→…→7→0 順序繼續切換，放開立即停止且不再執行短按。
+- `hardware.button.Button` 只提供「釋放或逾時」輸入結果；`tasks.button1_task` 決定短按／長按政策，並一律呼叫 `CommandService.submit('cycle', 'button1')`。
+- 沒有另外建立 timer task；取消 `button1_task` 時 `CancelledError` 向外傳播，因此不會留下延後命令。釋放與 800 ms 期限同時被觀察時，以釋放為準。取消或放開只停止後續提交，已由`CommandService`受理的命令不會被隱含撤回。
+
 ### 題目 B：OLED 狀態頁輪播
 
 要求：
@@ -907,6 +917,66 @@ ESP32 實機結果：
 - 至少一個失敗案例。
 - 至少一個邊界時間案例。
 
+### 16.1 題目 A：長按按鈕提交
+
+- **題目：**A，長按按鈕。
+- **問題定義：**保留按鈕 1 的短按換下一色，並加入按住連續換色。穩定按下後，800 ms 內放開時只在放開後提交一次 `cycle`；持續按住達 800 ms 時立即提交第一次長按命令，之後每 300 ms 再提交一次，放開後停止且不補送短按命令。
+- **硬體與設定：**公開範例的按鈕 1 是 GPIO 17、內部上拉、低電位按下；去彈跳 20 ms、輪詢 30 ms、長按門檻 800 ms、重複週期 300 ms。實際部署仍以未公開的 `config.py` 與實機接線為準。
+- **新增或修改的 task：**修改既有 `tasks.button1_task()`，沒有新增常駐 task。`hardware.button.Button.wait_release()` 增加可選的 `timeout_ms` 與 `reject_if`，但只回報輸入端的釋放／逾時與 busy 拒絕狀態，不決定 LED 顏色或手勢政策。
+- **使用的 await 邊界：**`wait_press()` 等待穩定按下；`wait_release(timeout_ms=800)` 區分短按與長按；進入長按後以 `wait_release(timeout_ms=300)` 等待釋放或下一個重複點；每輪手勢完成後 `sleep_ms(100)`；非取消例外後 `sleep(1)`，避免錯誤迴圈忙轉。driver 內的輪詢也使用 `sleep_ms()` 讓出事件迴圈。
+- **Event／Snapshot／Queue 選擇理由：**手勢判定只需要目前按壓狀態與時間，不需要 Event 或 Snapshot。每一次換色都必須保留為獨立命令，因此經 `CommandService` 送入 `LedController` 的有限 Queue；若改用 Event，連續多次 `set()` 可能合併，無法代表每一次換色。
+- **共享資源與 owner：**`button1_task()` 只是 producer，只能呼叫 `command_service.submit('cycle', 'button1')`。`LedController` 是 RGB LED 唯一 owner，負責命令驗證、排序、狀態轉換與 GPIO 寫入；按鈕 task 和 `Button` driver 都不直接寫 LED GPIO。
+- **錯誤與 timeout 政策：**`wait_release()` 回傳 `True` 表示已釋放，回傳 `False` 表示期限到時仍按住；這個 timeout 是手勢結果，不是執行錯誤。只要同一次按壓期間曾觀察到 `command_service.busy`，`press_rejected` 就保持為真，停止長按重複並等到放開，不在 busy 結束後補送。`CommandService` 回傳的 `rejected` receipt 只記錄，不重試；其他例外會記錄後延遲一秒再進入下一輪。
+- **取消與 cleanup 政策：**`button1_task()` 明確重新拋出 `CancelledError`，不把取消當成一般錯誤重啟。`wait_release()` 不建立背景 timer；取消後不會再產生延後命令。若取消時腳位已釋放，driver 的 `finally` 會清除 `is_pressed`。已被 `CommandService` 受理的命令不因按鈕放開或 task 取消而隱含撤回，仍由 owner 完成或依 owner 停止流程處理。
+- **桌面測試結果：**Fake GPIO 邊界測試已驗證「第 800 ms 同時看到釋放時，釋放優先」、「持續按住 800 ms 回傳逾時且保留按下狀態」及「等待被取消且腳位已釋放時清除狀態」。task 測試已驗證短按只提交一次、長按依 800／300／300 ms 等待並在放開後不補短按、取消後停止未來重複，以及按住期間遇到 busy 後停止提交。桌面 smoke 另觀察到短按輸出 `[0]`、兩個長按節拍輸出 `[0, 1]`，在第一筆命令前取消時提交 0 筆。
+- **ESP32 實機結果：**尚未在 ESP32 實體按鈕上驗證本題的 800／300 ms 手感、去彈跳與 RGB GPIO 輸出；不可把桌面 fake 測試寫成實機通過。
+- **未驗證項目：**實際按鍵彈跳、長時間按住、在實機 busy 效果中途按住、取消時的真實腳位狀態，以及不同負載下重複週期的排程誤差。
+- **回復方式：**以 `mdy_07/hardware/button.py`、`mdy_07/tasks.py`、`mdy_07/config.example.py` 與 `mdy_07/tests/test_led_owner.py` 還原修改前版本，移除新增的 `tests/test_button.py`；私人 `config.py` 只移除本題新增的兩個非機密時間欄位，不得用公開範例覆蓋 WiFi profiles。`mdy_07/` 是來源快照，不可部署到 ESP32。
+
+#### 任務流程圖
+
+```mermaid
+flowchart TD
+    A["wait_press：穩定按下"] --> B["wait_release：首段 800 ms"]
+    B --> C{"等待結果"}
+    C -- "釋放，含期限同時可見" --> D{"本次按壓曾遇到 busy"}
+    D -- "否" --> E["提交一次 cycle，視為短按"]
+    D -- "是" --> F["不提交，結束本次按壓"]
+    C -- "逾時且仍按住" --> G{"本次按壓曾遇到 busy"}
+    G -- "是" --> H["停止命令並等待釋放"]
+    H --> F
+    G -- "否" --> I["提交一次 cycle，進入長按"]
+    I --> J["wait_release：300 ms"]
+    J --> K{"等待結果"}
+    K -- "釋放" --> L["停止，不補短按"]
+    K -- "逾時且未 busy" --> I
+    K -- "期間遇到 busy" --> H
+```
+
+任何等待點收到取消時，都直接離開本流程並重新拋出 `CancelledError`。
+
+#### 修改前後差異
+
+| 項目 | 修改前 | 修改後 |
+|---|---|---|
+| 短按命令時點 | 穩定按下後立即提交 | 800 ms 內放開後提交 |
+| 每次按壓的命令數 | 固定一筆 | 短按一筆；長按從 800 ms 起每 300 ms 一筆 |
+| 釋放等待 | 無期限，只等待釋放 | 可回報釋放或指定期限到達 |
+| LED 業務政策 | `button1_task()` 提交一筆命令 | 仍由 `button1_task()` 判定手勢並提交，driver 不知道 LED 政策 |
+| 取消 | 落入一般例外處理的風險不明確 | 明確重新拋出 `CancelledError`，沒有背景 timer |
+| 設定 | 沒有長按時間設定 | 公開設定新增 800 ms 門檻與 300 ms 重複週期 |
+
+#### 案例證據
+
+| 類型 | 操作／條件 | 應有且已由桌面測試證明的結果 |
+|---|---|---|
+| 正常案例：短按 | 穩定按下後未滿 800 ms 即放開 | 放開後只提交一筆 `cycle` |
+| 正常案例：長按 | 800 ms 與下一個 300 ms 期限皆仍按住，之後放開 | 依序提交兩筆 `cycle`，放開時不再補一筆短按 |
+| 失敗案例：busy | 長按已提交一筆後，同一次按壓期間 owner 轉為 busy | 保留已受理命令，停止後續重複，等到放開才開始下一輪 |
+| 邊界時間案例 | 第 800 ms 恰好可觀察到釋放 | 釋放優先，視為短按，只提交一筆 |
+| 取消案例 | 已進入等待但 task 被取消 | `CancelledError` 向外傳播，不產生取消後的新命令 |
+
+
 ---
 
 ## 17. 故障排除索引
@@ -957,7 +1027,7 @@ ESP32 實機結果：
 
 ### OLED 顯示空白
 
-- 確認 I2C 0、SCL 7、SDA 5。
+- 確認 I2C 0、SCL 39、SDA 40。
 - 確認供電與共地。
 - 確認 `ssd1306.py` 在裝置上。
 - 觀察初始化與更新錯誤。
@@ -1020,3 +1090,169 @@ ESP32 實機結果：
 8. 如果 Web 回傳 HTTP 202，哪些事情仍可能尚未發生？
 9. 如何證明一個修改真的在 ESP32 上安全，而不是只在桌面測試通過？
 10. 如果要把新功能加入本專案，哪一個 task 或 owner 應該負責它？為什麼？
+
+### 19.1 反思回答
+
+1. **為什麼單一事件迴圈仍可處理多種工作？**
+   每個 coroutine 在等待 GPIO 輪詢間隔、感測週期、Socket 或 MQTT I/O 時都會執行 `await`，把控制權交回事件迴圈。事件迴圈因此可以在一個工作等待期間執行其他已就緒工作；前提是每個永久迴圈都有可到達的 `await`，而且兩個 `await` 之間不能長時間阻塞。
+
+2. **為什麼非同步不等於平行執行？**
+   目前 Python coroutine 是合作式交錯執行，同一時刻仍只有目前被事件迴圈選中的 Python 程式片段在執行。網路或硬體可能在背景等待資料，但這不代表兩段 Python 業務邏輯同時跑；若一段程式不讓出控制權，其他 coroutine 一樣會停住。
+
+3. **哪一種工作最不適合直接放在 callback 中？**
+   會長時間執行或需要等待的工作最不適合，例如阻塞式網路 I/O、感測器重試、播放整段旋律、大量計算或用 `time.sleep()` 延遲。callback 應只做必要的資料驗證、更新極小狀態，或通知專責 task；真正工作交給可 timeout、可取消的 coroutine。
+
+4. **為什麼 LED single owner 比所有 task 共用一把 Lock 更容易維護？**
+   Lock 只能避免同一瞬間同時寫 GPIO，不能統一命令順序、AUTO／MANUAL 政策、busy 拒絕、效果恢復、receipt 狀態與停止時熄燈。single owner 讓所有 producer 只提交命令，把上述規則集中在 `LedController`，因此新增來源時不必在每個 task 複製同一套 LED 狀態機。
+
+5. **什麼時候 Event 不夠用？**
+   當每一次事件都必須保留、需要 payload、順序、計數或背壓時，Event 不夠用。Event 只表示「目前已被設定」；在 consumer 清除前多次 `set()` 可能合併。這類需求應使用有限容量 Queue，並明確定義滿載時拒絕、丟棄或覆蓋哪一筆。
+
+6. **為什麼 snapshot 要保存多個中繼欄位？**
+   `value` 保存最後可用值；`valid` 表示目前樣本是否可信；`quality` 提供可直接顯示或判斷的品質狀態；`age_ms` 說明最後有效更新距今多久；`error` 保留本次失敗原因。只有數值時，consumer 無法分辨新資料、過期的 last-good 資料、從未取得資料與感測失敗，也可能把舊值誤報為即時正常值。
+
+7. **`MOTION_DETECTED_HOLD_MS` 與 `PIR_LOW_REARM_MS` 有何不同？**
+   `MOTION_DETECTED_HOLD_MS` 目前是 5000 ms，只控制 Web／RAM 的 `detected` 提示要在最近一次偵測後保留多久。`PIR_LOW_REARM_MS` 目前是 1500 ms，控制 PIR 必須維持低電位多久才重新 armed、允許下一次事件。前者是顯示時效，後者是事件去重與重新觸發政策，不能互相取代。
+
+8. **HTTP 202 回傳後仍可能尚未發生什麼？**
+   202 只證明命令通過同步受理，不證明 owner 已開始處理、GPIO 已改變、效果已完成或 MQTT 已發佈。命令可能仍在 Queue，之後也可能因停止或硬體錯誤成為 `cancelled`／`failed`；client 必須用 request ID 查結果，而不能把 `accepted` 顯示成 `executed`。
+
+9. **如何證明修改在 ESP32 上安全？**
+   先通過桌面邏輯測試，再把同版本程式與非機密設定部署到目標 ESP32，核對實際接線與啟動紀錄，操作正常、失敗、timeout、取消及邊界案例，並同時觀察序列輸出、API 狀態和真實 GPIO／周邊結果。停止與重啟後還要確認 task 能清理資源、輸出回到安全狀態，且其他按鈕、感測、Web、MQTT 工作仍可回應。沒有實機證據時，只能標示桌面通過。
+
+10. **新功能應由哪一個 task 或 owner 負責？**
+    先依資源與政策分工，而不是把邏輯放進最方便呼叫的 driver。以題目 A 為例，按壓時間與短按／長按政策屬於 `button1_task()`，`Button` 只提供輸入狀態，RGB GPIO 仍只由 `LedController` 寫入。其他功能也採同一原則：感測 task 更新 Snapshot、MQTT manager 管連線與發佈、喇叭 owner 管播放；跨資源需求用命令或事件交接，不讓 producer 直接控制別人的硬體。
+
+---
+
+## 附錄 A：實驗一至十參考回答與實測結果
+
+本附錄依目前程式、`uasyncio_experiments/` 與 2026-11-05 的 ESP32-S3 執行紀錄作答。以下將「由程式可判定的設計答案」和「當次實機確實觀察到的結果」分開；沒有操作按鈕、PIR 或 RFID 卡的項目保留為未驗證，不以預期行為代替實測。
+
+### A.1 實驗一：兩個協程交錯執行
+
+**題目回答：**
+
+| 問題 | 回答 |
+|---|---|
+| 哪一行讓 `fast_task()` 讓出控制權？ | `await sleep_ms(200)`；在手冊的簡化程式中是 `await uasyncio.sleep_ms(200)`。 |
+| `slow_task()` 是否阻塞 200 ms 的任務？ | 不會。`slow_task()` 在 `await sleep_ms(500)` 期間把控制權交回事件迴圈，`fast_task()` 可以繼續執行。 |
+| `gather()` 何時返回？ | `fast_task()` 與 `slow_task()` 都完成後才返回，接著輸出 `all done`。 |
+
+若把非同步等待改成 `time.sleep(0.5)`，同一執行緒會在這 0.5 秒內停住，事件迴圈無法切換到 `fast_task()`；這是阻塞 API 與 cooperative scheduling 的差異。當次實機沒有另跑阻塞版本，因此這段是程式語意分析，不是實測結果。
+
+**實測結果：**程式在 1.800 秒自然結束；`fast` 與 `slow` 在各自的 `await` 間交錯，最後輸出 `all done`。此項通過。
+
+### A.2 實驗二：三個按鈕與非同步去彈跳
+
+**題目回答：**
+
+1. 按鈕使用 `Pin.PULL_UP`，未按下時為高電位，接到 GND 後按下為低電位。
+2. `debounce_read()` 必須連續取樣，因為機械接點在按下或放開瞬間可能快速抖動；單次低電位不足以證明一次穩定按壓。
+3. `wait_release()` 也必須使用非同步等待，否則使用者持續按住時會阻塞 DHT、PIR、Web 與其他 task。
+4. 按鈕 task 不直接呼叫 `RgbLed.write()`。按鈕 1、3 將命令交給 `CommandService`，最後只有 `LedController.run()` 寫 RGB GPIO；按鈕 2 只向 MQTT 發佈流程提交請求。
+5. 等待按下、去彈跳與等待放開都有 `await`，因此按住按鈕時其他 task 仍應取得執行機會。
+
+**實測結果：**6.144 秒觀察期間 heartbeat 從 0 持續到 5，證明三個按鈕 task 在等待輸入時沒有阻塞事件迴圈。當次未人工按下或放開任何按鈕，所以穩定低電位、單次命令、去彈跳與釋放訊息仍未完成實機驗收；本項只能判定為部分驗證。
+
+### A.3 實驗三：DHT11、光感與 OLED 的不同週期
+
+**一筆可保存的觀察：**
+
+| 欄位 | 回答 |
+|---|---|
+| `value` | 實驗三觀察到溫度 24～25°C、濕度 69%、光感 4095；實驗十的 `/api/data` 另記錄 25°C、69%、光感 3768。 |
+| `valid` | 成功更新時為 `True`；讀取錯誤時改為 `False`，但 `value` 保留最後成功值。 |
+| `quality` | 成功更新為 `good`；讀取錯誤為 `error`。 |
+| `age_ms` | 每次 `snapshot()` 以目前 tick 減去 `updated_at_ms` 計算；當次報告未保存精確數值。 |
+| `error` | 感測成功時為 `None`；失敗時保存錯誤文字。2026-11-05 的 OLED `ETIMEDOUT` 是顯示器錯誤，不是感測欄位值；2026-11-06 修正腳位後 OLED 初始化與寫入未再出現該錯誤。 |
+| `updated_at_ms` | 保存最近一次成功更新的 tick；當次報告未保存精確數值。 |
+
+**問題回答：**
+
+1. 不能把失敗值改成 `-1`，因為 `-1` 可能被消費者誤當成真實量測。保留 last-good value，再以 `valid`、`quality`、`error` 和 `age_ms` 表達品質，才能區分「數值」與「目前是否可信」。
+2. `age_ms` 讓 Web 判斷資料是否過期；數值相同不代表沒有收到新樣本，成功更新仍會刷新 `updated_at_ms`。
+3. OLED 不應直接呼叫 `dht_sensor.measure()`，否則顯示更新會建立第二個硬體讀取者、改變 DHT 量測週期，並可能讓慢速量測拖住顯示流程。OLED 應只讀 `SensorSnapshot`。
+4. 感測成功不等於一定觸發低光警示。還要確認 `LIGHT_ALERT_ENABLED`、AUTO 模式、`armed` 狀態、`LIGHT_DARK_WHEN_HIGH` 的方向及 trigger／reset 門檻；命令仍可能被 LED owner 的 busy 政策拒絕。
+
+**實測結果：**2026-11-05 首次執行時，DHT 約每兩秒更新，光感與 snapshot sequence 持續增加，但 OLED 因驅動硬編碼 SCL 7／SDA 5 而初始化 `ETIMEDOUT`，程式降級到序列埠。2026-11-06 將 OLED 改為讀取 `config.py` 的 SCL 39／SDA 40 後重跑：I2C 掃描找到 `0x3C`，SSD1306 初始化與畫面寫入完成；6 秒觀察內 DHT 為 25°C、濕度 71% 降至 69%，光感為 846～871，consumer 每秒輸出且未出現 OLED 例外。已驗證 I2C 與顯示寫入路徑；本次沒有攝影畫面可供文件直接核對實體像素。
+
+### A.4 實驗四：PIR Event 與無源喇叭
+
+**設計答案：**
+
+- PIR 必須穩定高電位至少 200 ms 才設定 `motion_event`，持續高電位不會每 100 ms 重複計數。
+- 觸發後要穩定低電位至少 1500 ms 才重新 armed；不足 1500 ms 的短低電位不應允許下一次事件。
+- `motion_event` 是通知旗標，不保存每次移動的數量；播放期間的多次 `set()` 可能合併為最多一筆待處理通知。
+- `Speaker.play_song()` 與 `music_on_motion_task()` 的 `finally` 都負責靜音，取消或例外不能只依賴正常播放結束。
+- `pir_high` 是目前 GPIO 值；`detected` 是顯示保持狀態；`count` 是已確認事件數；`armed` 決定能否接受下一次事件。
+
+**實測結果：**實機私人設定使用 PIR GPIO 6、喇叭 PWM GPIO 21，兩者初始化成功。8.113 秒內 PIR 保持低電位，狀態持續為 `ready`／`idle`，事件迴圈仍有輸出。當次沒有製造移動，因此「短於 200 ms」、「高電位觸發」、「持續高不重複」、「低電位重新武裝」、「旋律播放」與「播放中取消」都未實測；本項為部分驗證。
+
+### A.5 實驗五：RGB LED 單一 owner 與命令 receipt
+
+**題目回答：**
+
+1. Producer 只能呼叫 `CommandService.submit()`；命令先得到 request ID 與 `accepted`／`rejected` receipt，之後由 `LedController.run()` 執行。
+2. `accepted` 只表示命令進入受理邊界，還可能變成 `executing`、`executed`、`failed` 或 `cancelled`；不能在收到 accepted 時宣稱 GPIO 已完成。
+3. 效果執行期間 owner 保持 busy。新命令要得到明確的 `rejected`／`busy`，而不是靜默覆蓋效果。
+4. owner 停止時先拒絕或取消未完成工作，最後將 LED 寫成 0，再設定 stopped confirmation。
+
+**實測結果：**2.997 秒內，`cycle` 由 accepted 轉為 executed；綠閃受理後，效果期間再次提交 `cycle` 得到 rejected／busy；綠閃最後為 executed。停止時收到 owner 已停止訊息且輸出已關閉。這證明 receipt 與 busy 邊界，但未使用外部儀器量測實際 GPIO 電位；本次實驗也沒有重跑低光警示恢復案例。
+
+### A.6 實驗六：MQTT 非同步發佈與訂閱
+
+**題目回答：**
+
+- `connect()`、`subscribe()` 與 `publish()` 都是非同步網路邊界，等待期間必須讓其他 task 執行。
+- 收訊 callback 採同步三參數契約；callback 只做最小解析或派送，不直接長時間等待，也不直接寫 LED。
+- 發佈請求的 accepted 只表示請求已登記；只有底層 publish 成功後才能記錄 published，timeout 或未連線應是 failed／unavailable。
+- `publish_event` 只表示至少有一個發佈要求待處理，不累計每一次按鈕事件。
+
+**實測結果：**延長觀察後，實驗在 22.778 秒自然結束；WiFi 取得 IP，MQTT 完成 connect、subscribe、publish，callback 收到同一筆教學訊息，最後 disconnect 並輸出清理完成。這次由實驗程式直接執行發佈，沒有按下按鈕 2，也沒有透過 `/api/publish/status` 觀察完整狀態序列。斷網、Broker timeout、重連失敗及 failed／unavailable 路徑尚未實測。
+
+### A.7 實驗七：RFID 非同步 SPI
+
+**問題回答：**
+
+1. 無卡不應是主程式致命錯誤；`read_uid()` 回傳 `None`，task 等待下一輪。
+2. `read_uid()` 是 `async def`，因為底層 `request()` 與 `anticoll()` 在等待 MFRC522 IRQ／狀態暫存器時要讓出事件迴圈。
+3. `lib/mfrc522_async.py` 的 `_tocard()` 輪詢迴圈使用 `await asyncio.sleep_ms(1)`；CRC 等待迴圈也使用相同的非阻塞等待。
+4. 「無卡」和所有讀取錯誤目前不能完全區分。驅動的 `request()` 會把無卡與部分通訊失敗都轉成 `ERR`，封裝層因此回傳 `None`；但 `anticoll()` 失敗會拋出 `RuntimeError`。這是目前可觀察性的限制。
+5. 最近五筆資料只放在 `rfid_state` 的 RAM list；沒有資料庫或 Flash 持久化，所以重啟會清空。
+
+**實測結果：**程式持續執行 30.096 秒且沒有未處理例外，但只看到啟動訊息；沒有放置卡片，也沒有在觀察窗口內看到每十次空輪詢的進度訊息。因此 UID、時間、最近五筆上限與重啟清空都未完成實機驗收，本項維持未完成。
+
+### A.8 實驗八：Timeout、錯誤注入與安全清理
+
+**實際回答：**
+
+| 測試 | 觸發方式 | 結果 |
+|---|---|---|
+| Timeout | 以 0.2 秒 timeout 包住預計執行 2 秒的操作 | 收到 `TimeoutError`，沒有宣稱成功；`finally` 執行 `stop()`，最後 `active=False`。 |
+| 錯誤注入 | 啟動後 50 ms 主動拋出 `OSError("模擬感測器斷線")` | 錯誤被記錄，`finally` 執行 `stop()`，最後 `active=False`。 |
+
+程式在 0.536 秒自然結束，兩條失敗路徑都回到安全狀態。此實驗使用 `FakeActuator`，證明的是 timeout／例外控制流程，不代表真實 GPIO 已量測。手冊列出的 DHT 拔線、RFID 未接、MQTT 斷線、喇叭取消與 LED controller stop 並未在這個實驗中逐項操作；OLED 失敗降級則已在實驗三觀察到。
+
+### A.9 實驗九：任務取消與資源釋放
+
+**問題回答：**
+
+1. 沒有 `finally` 時，正常停止以外的 `task.cancel()`、未處理例外或上層中止都可能略過 `output.off()`、PWM 靜音或 stopped confirmation。
+2. `stop_event.set()` 不會讓 task 在任意指令中間立刻停止；worker 要執行到下一次迴圈條件或可恢復的 `await`，看到 stop flag 後才離開。
+3. stopped confirmation 證明 worker 已經走完 `finally`。如果呼叫者只送出 stop request 就繼續釋放資源，可能和仍在清理的 task 發生競爭。
+
+**實測結果：**0.920 秒內完成兩條路徑。正常停止先設定 stop request，等待 confirmation 後得到 `active=False`；取消路徑收到 `CancelledError`，仍執行 `finally`，最後也是 `active=False`。本項通過，但使用 `FakeOutput`，不是實體 GPIO。
+
+### A.10 實驗十：Web 狀態與非同步控制
+
+**分析問題回答：**
+
+1. `/api/motion/status` 只複製 PIR／喇叭 RAM 快照，不呼叫 DHT、ADC 或 SPI；因此 DHT 量測變慢時，快速控制狀態不應被慢感測回應綁住。
+2. HTTP 202 與 `accepted` 只表示後端受理命令。命令可能仍在 queue、正在執行，或最後變成 rejected、failed、cancelled；前端必須以 request ID 查詢最終 receipt。
+3. `/api/data.light_thresholds` 由後端讀取 `config.LIGHT_ALERT_TRIGGER_ADC`、`LIGHT_ALERT_RESET_ADC` 與 `LIGHT_DARK_WHEN_HIGH`，缺少欄位時才使用相容預設值。
+4. 瀏覽器重整不會重啟 ESP32，所以 RFID 與 PIR 的 RAM 狀態通常仍存在；ESP32 重啟才會重新建立 state 並清空紀錄。若 task 從未取得資料，重整後仍只會看到空 snapshot。
+
+**實測結果：**ESP32 取得 `192.168.137.176`，瀏覽器成功渲染儀表板。`GET /`、`/api/status`、`/api/data`、`/api/led/status` 與兩個 uPlot 資源回 200；`POST /api/led/toggle` 回 202 與 request ID 2，後續 `GET /api/led/commands/2` 得到 executed，LED snapshot 從 output 7／enabled 變為 output 0／disabled。這證明受理與完成有分開查詢。
+
+限制：當次看到 favicon 404、兩次 `ECONNRESET`、兩次被中止的 LED status 輪詢，以及後續 DHT `ETIMEDOUT`；直接 API 驗證仍成功且保留 last-good 感測資料。沒有在此回合觸發 PIR，也沒有 RFID 卡資料可驗證瀏覽器重整前後的紀錄。

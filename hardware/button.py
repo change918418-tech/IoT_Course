@@ -72,14 +72,31 @@ class Button:
             
             await uasyncio.sleep_ms(config.BUTTON_POLL_INTERVAL_MS)
     
-    async def wait_release(self):
+    async def wait_release(self, timeout_ms=None, reject_if=None):
         """
-        等待按鈕被釋放（非同步）
+        等待按鈕釋放。
+
+        timeout_ms 為 None 時持續等待；指定毫秒數時，若按鈕仍按住則
+        回傳 False，釋放則回傳 True。釋放與逾時同時可見時以釋放為準。
         """
-        while self.pin.value() == 0:  # 仍在按下
-            await uasyncio.sleep_ms(config.BUTTON_POLL_INTERVAL_MS)
-        
-        self.is_pressed = False
+        waited_ms = 0
+        try:
+            while self.pin.value() == 0:
+                if reject_if is not None and reject_if():
+                    self.press_rejected = True
+                if timeout_ms is not None and waited_ms >= timeout_ms:
+                    return False
+
+                sleep_ms = config.BUTTON_POLL_INTERVAL_MS
+                if timeout_ms is not None:
+                    sleep_ms = min(sleep_ms, timeout_ms - waited_ms)
+                await uasyncio.sleep_ms(sleep_ms)
+                waited_ms += sleep_ms
+            return True
+        finally:
+            # 取消等待時不建立背景計時器；若已釋放，同步清除軟體狀態。
+            if self.pin.value() != 0:
+                self.is_pressed = False
 
 
 class ButtonEvent:

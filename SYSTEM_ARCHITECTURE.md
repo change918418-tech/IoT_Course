@@ -156,14 +156,14 @@ flowchart LR
 | 元件 | GPIO／介面 | 目前用途 |
 |---|---|---|
 | RGB LED | R=37、G=35、B=33 | 3-bit 顏色輸出；由 `LedController` 唯一寫入。 |
-| 按鈕 1 | GPIO 17 | `Pin.IN`、`PULL_UP`；按下提交 LED `cycle` 命令。 |
+| 按鈕 1 | GPIO 17 | `Pin.IN`、`PULL_UP`；短按提交一次 LED `cycle`，長按持續提交到放開。 |
 | 按鈕 2 | GPIO 21 | `Pin.IN`、`PULL_UP`；按下設定 MQTT 發佈事件。 |
 | 按鈕 3 | GPIO 16 | `Pin.IN`、`PULL_UP`；按下提交 LED `green_flash_alert` 命令。 |
 | DHT11 | GPIO 18 | 溫度／濕度量測與 RAM 快取。 |
 | TEMT 光感測器 | ADC GPIO 8 | ADC 原始值 0～4095；更新 `SensorSnapshot` 並提交低光命令。 |
 | PIR | GPIO 4 | 高電位表示移動；低到高時觸發音樂事件。 |
 | 無源喇叭 | GPIO 6 | PWM 播放 `MOTION_MELODY`。 |
-| OLED | I2C 0；SCL=7、SDA=5 | SSD1306，128×64；顯示時間與 DHT 資料。 |
+| OLED | I2C 0；SCL=39、SDA=40 | SSD1306，128×64；顯示時間與 DHT 資料。 |
 | RFID | SPI SCK=12、MOSI=11、MISO=10、RST=9、CS=13 | MFRC522 非同步輪詢與 UID 快照。 |
 
 RGB 色碼：
@@ -203,7 +203,7 @@ LIGHT_POLL_INTERVAL_MS = 50
 5. 警示期間由 `LedController` 保存原本的 desired／enabled 狀態，完成後還原。
 6. 警示完成前不接受一般 LED 命令。
 
-OLED 腳位、尺寸與字型路徑目前直接寫在 `hardware/display.py`；雖然設定範本也有對應欄位，顯示模組沒有完整使用那些欄位。
+OLED 的 I2C controller、腳位、頻率與尺寸由 `config.py` 提供；`hardware/display.py` 只負責依設定初始化 SSD1306 與載入可選字型。
 
 ## 6. 開機與執行生命週期
 
@@ -232,7 +232,7 @@ WiFi、NTP 與 DHT11 的底層操作可能是同步呼叫，會短暫占用協�
 
 | 任務 | 觸發／頻率 | 讀取 | 輸出／副作用 |
 |---|---|---|---|
-| `button1_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 1 | 透過 `CommandService` 提交 LED `cycle` 命令。 |
+| `button1_task` | 穩定按下後等待釋放；800 ms 進入長按、之後每 300 ms 重複 | 按鈕 1 | 短按放開提交一次 `cycle`；長按持續由 `CommandService` 提交 `cycle`。釋放或取消停止新增提交，但不撤回已受理命令。 |
 | `button2_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 2 | `publish_event.set()`。 |
 | `button3_task` | 按下；輪詢 30 ms、去彈跳約 20 ms | 按鈕 3 | 空閒時提交 `green_flash_alert`；忙碌按壓只消耗、不排隊。 |
 | `dht11_read_task` | 每 2 秒 | DHT11 | 更新 `SensorSnapshot`；失敗保留 last-good 並標示 quality／error。 |
@@ -583,7 +583,7 @@ assets/uplot/1.6.32/LICENSE
 | LED 命令 Event 可能合併 | `publish_event` 是單一旗標，不保存觸發次數；發佈期間的新事件可能被後續 `clear()` 合併或消除。 |
 | Web 感測查詢只讀快照 | `/api/data` 讀 `SensorSnapshot`，不直接呼叫 ADC 或 DHT；感測任務負責更新資料。 |
 | 任務沒有統一 supervisor | 個別任務多半捕捉例外後繼續，但必要任務若退出，主系統仍可能繼續運作而沒有明確告警。 |
-| 設定未完全集中 | OLED 腳位／尺寸／字型路徑寫在 `hardware/display.py`；Broker 由 `main.py` 直接指定；MQTT port 與退避設定未完整套用。 |
+| 設定未完全集中 | OLED 已改用 `config.py`；Broker 仍由 `main.py` 直接指定，MQTT port 與退避設定未完整套用。 |
 | 部署相依仍需驗證 | Microdot、`mqtt_as`、`ssd1306`、RFID 驅動、字型與 import path 必須依實際 MicroPython 檔案系統確認。 |
 | GPIO 與板型限制 | 公開設定的 GPIO 37、35、33、8 等腳位不一定適用所有 ESP32 變體；必須依實際板型與電氣條件驗證。 |
 | 機密與存取控制不足 | WiFi profiles 為本機設定；HTTP 無驗證；MQTT 使用公開 TCP 1883、共用 topic，沒有帳密與 TLS。 |

@@ -195,6 +195,195 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(busy_button.press_rejected)
         self.assertEqual(busy_button.releases, 1)
 
+    async def test_button1_short_press_cycles_once_after_release(self):
+        class Button:
+            def __init__(self):
+                self.press_rejected = False
+                self.press_count = 0
+                self.timeouts = []
+
+            async def wait_press(self, reject_if=None):
+                if self.press_count:
+                    raise StopCycles()
+                self.press_count += 1
+                self.press_rejected = bool(reject_if and reject_if())
+
+            async def wait_release(self, timeout_ms=None, reject_if=None):
+                self.timeouts.append(timeout_ms)
+                return True
+
+        class Commands:
+            busy = False
+
+            def __init__(self):
+                self.calls = []
+
+            def submit(self, *args):
+                self.calls.append(args)
+                return {'status': 'accepted'}
+
+        async def no_sleep(_):
+            pass
+
+        task = load_task(
+            'button1_task',
+            uasyncio=types.SimpleNamespace(
+                sleep_ms=no_sleep,
+                sleep=no_sleep,
+                CancelledError=asyncio.CancelledError))
+        button = Button()
+        commands = Commands()
+        with self.assertRaises(StopCycles):
+            await task(button, commands, asyncio.Event())
+
+        self.assertEqual(button.timeouts, [800])
+        self.assertEqual(commands.calls, [('cycle', 'button1')])
+
+    async def test_button1_long_press_repeats_until_release_without_short_press(self):
+        class Button:
+            def __init__(self):
+                self.press_rejected = False
+                self.press_count = 0
+                self.releases = iter((False, False, True))
+                self.timeouts = []
+
+            async def wait_press(self, reject_if=None):
+                if self.press_count:
+                    raise StopCycles()
+                self.press_count += 1
+                self.press_rejected = bool(reject_if and reject_if())
+
+            async def wait_release(self, timeout_ms=None, reject_if=None):
+                self.timeouts.append(timeout_ms)
+                return next(self.releases)
+
+        class Commands:
+            busy = False
+
+            def __init__(self):
+                self.calls = []
+
+            def submit(self, *args):
+                self.calls.append(args)
+                return {'status': 'accepted'}
+
+        async def no_sleep(_):
+            pass
+
+        task = load_task(
+            'button1_task',
+            uasyncio=types.SimpleNamespace(
+                sleep_ms=no_sleep,
+                sleep=no_sleep,
+                CancelledError=asyncio.CancelledError))
+        button = Button()
+        commands = Commands()
+        with self.assertRaises(StopCycles):
+            await task(button, commands, asyncio.Event())
+
+        self.assertEqual(button.timeouts, [800, 300, 300])
+        self.assertEqual(commands.calls, [
+            ('cycle', 'button1'),
+            ('cycle', 'button1'),
+        ])
+
+    async def test_button1_cancellation_stops_future_repeats_only(self):
+        waiting = asyncio.Event()
+
+        class Button:
+            press_rejected = False
+
+            def __init__(self):
+                self.release_count = 0
+
+            async def wait_press(self, reject_if=None):
+                pass
+
+            async def wait_release(self, timeout_ms=None, reject_if=None):
+                self.release_count += 1
+                if self.release_count == 1:
+                    return False
+                waiting.set()
+                await asyncio.Event().wait()
+
+        class Commands:
+            busy = False
+
+            def __init__(self):
+                self.calls = []
+
+            def submit(self, *args):
+                self.calls.append(args)
+
+        async def no_sleep(_):
+            pass
+
+        button_task = load_task(
+            'button1_task',
+            uasyncio=types.SimpleNamespace(
+                sleep_ms=no_sleep,
+                sleep=no_sleep,
+                CancelledError=asyncio.CancelledError))
+        commands = Commands()
+        running = asyncio.create_task(
+            button_task(Button(), commands, asyncio.Event()))
+        await waiting.wait()
+        running.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+        await asyncio.sleep(0)
+
+        self.assertEqual(commands.calls, [('cycle', 'button1')])
+
+    async def test_button1_busy_during_hold_stops_repeats_until_release(self):
+        class Button:
+            def __init__(self):
+                self.press_rejected = False
+                self.press_count = 0
+                self.release_count = 0
+
+            async def wait_press(self, reject_if=None):
+                if self.press_count:
+                    raise StopCycles()
+                self.press_count += 1
+
+            async def wait_release(self, timeout_ms=None, reject_if=None):
+                self.release_count += 1
+                if self.release_count == 1:
+                    return False
+                if self.release_count == 2:
+                    self.press_rejected = True
+                    return False
+                return True
+
+        class Commands:
+            busy = False
+
+            def __init__(self):
+                self.calls = []
+
+            def submit(self, *args):
+                self.calls.append(args)
+                return {'status': 'accepted'}
+
+        async def no_sleep(_):
+            pass
+
+        button_task = load_task(
+            'button1_task',
+            uasyncio=types.SimpleNamespace(
+                sleep_ms=no_sleep,
+                sleep=no_sleep,
+                CancelledError=asyncio.CancelledError))
+        button = Button()
+        commands = Commands()
+        with self.assertRaises(StopCycles):
+            await button_task(button, commands, asyncio.Event())
+
+        self.assertEqual(commands.calls, [('cycle', 'button1')])
+        self.assertEqual(button.release_count, 3)
+
+
     async def test_green_flash_gpio_failure_marks_request_failed(self):
         class BrokenHardware:
             def write(self, value):

@@ -17,25 +17,51 @@ from communication.wifi import get_current_time
 
 async def button1_task(button1, command_service, publish_event):
     """
-    按鈕 1 監聽任務。
+    按鈕 1：短按放開時換色一次；長按期間依固定週期持續換色。
 
-    按鈕只產生命令，不在 adapter 內操作 LED 硬體。
+    手勢判定與 LED 政策留在 task；Button driver 只回報釋放或逾時。
     """
     button_id = 1
+    long_press_ms = getattr(config, 'BUTTON_LONG_PRESS_MS', 800)
+    repeat_ms = getattr(config, 'BUTTON_LONG_REPEAT_MS', 300)
     print(f"[Task] 按鈕 {button_id} 監聽已啟動")
 
     while True:
         try:
             await button1.wait_press(reject_if=lambda: command_service.busy)
             print(f"[Button] 按鈕 {button_id} 被按下")
-            if button1.press_rejected:
-                print('[Button] LED 命令未提交: busy')
-            else:
+            long_press_active = False
+
+            while True:
+                timeout_ms = repeat_ms if long_press_active else long_press_ms
+                released = await button1.wait_release(
+                    timeout_ms=timeout_ms,
+                    reject_if=lambda: command_service.busy)
+
+                if released:
+                    if button1.press_rejected:
+                        print('[Button] LED 命令未提交: busy')
+                    elif not long_press_active:
+                        receipt = command_service.submit('cycle', 'button1')
+                        print('[Button] LED 短按命令:', receipt)
+                    print(f"[Button] 按鈕 {button_id} 被釋放")
+                    break
+
+                if button1.press_rejected:
+                    print('[Button] LED 長按命令停止: busy')
+                    await button1.wait_release(
+                        reject_if=lambda: command_service.busy)
+                    print(f"[Button] 按鈕 {button_id} 被釋放")
+                    break
+
+                long_press_active = True
                 receipt = command_service.submit('cycle', 'button1')
-                print('[Button] LED 命令:', receipt)
-            await button1.wait_release()
-            print(f"[Button] 按鈕 {button_id} 被釋放")
+                print('[Button] LED 長按命令:', receipt)
+
             await uasyncio.sleep_ms(100)
+        except uasyncio.CancelledError:
+            # 不吞掉取消；wait_release 沒有背景 timer，取消後不會補送命令。
+            raise
         except Exception as e:
             print(f"[Error] 按鈕 {button_id} 任務異常: {e}")
             await uasyncio.sleep(1)

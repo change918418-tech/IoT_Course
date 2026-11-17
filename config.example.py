@@ -23,8 +23,9 @@ SPEAKER_PIN = 6
 
 # I2C 配置（OLED）
 I2C_ID = 0
-I2C_SCL_PIN = 7
-I2C_SDA_PIN = 5
+I2C_SCL_PIN = 39
+I2C_SDA_PIN = 40
+OLED_I2C_FREQ_HZ = 400000
 OLED_WIDTH = 128
 OLED_HEIGHT = 64
 
@@ -73,6 +74,9 @@ MOTION_MELODY = (('C4', 0.3), ('E4', 0.3), ('D4', 0.3),
 # 按鈕去彈跳時間
 BUTTON_DEBOUNCE_MS = 20         # 按鈕穩定判定時間
 BUTTON_POLL_INTERVAL_MS = 30    # 按鈕輪詢間隔
+# 按鈕 1 手勢時間（從穩定按下開始計時）
+BUTTON_LONG_PRESS_MS = 800       # 未釋放達此時間後進入長按
+BUTTON_LONG_REPEAT_MS = 300      # 長按期間每隔此時間切換下一色
 
 # ==================== WiFi 配置 ====================
 
