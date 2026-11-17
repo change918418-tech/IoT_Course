@@ -16,6 +16,18 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261117-054｜新增 LD2410B 開發板 UART 接線測試程式
+
+- **類別：**需求變更（毫米波雷達接線與獨立測試）。
+- **日期／紀錄時間：**2026-11-17 14:24:20 +08:00，工具取得台北時間。
+- **原因：**使用者新增 HLK-LD2410B 開發板，要求依目前 `config.py` 判斷可用接口、說明接線，並提供一個可直接確認開發板是否正常輸出資料的簡單測試軟體。
+- **作法：**只讀取私人 `config.py` 的非機密 GPIO 區段並與 `config.example.py` 交叉比對；選用兩份設定都未占用的 UART1、ESP32 TX GPIO14 與 RX GPIO2，不修改或公開私人 WiFi profiles。新增 `元件/01_毫米波雷達/test_ld2410b_uart.py`，以 256000 baud、8N1 初始化既有 `LD2410B` 驅動，啟動時列印接線，持續輸出目標狀態、運動／靜止距離與能量、探測距離，工程模式時另顯示光感與 OUT；逾時會提示檢查電源、共地、交叉 TX/RX 與 baudrate，`Ctrl+C` 可停止。本回合只有新增程式，沒有修改前版本可備份，因此未建立 `mdy_08/`。
+- **接線：**LD2410B `VCC`→ESP32 `5V/VBUS`、`GND`→`GND`、`UART_Tx`→ESP32 GPIO2（RX）、`UART_Rx`→ESP32 GPIO14（TX）；本測試不使用 `OUT`。模組必須以穩定 5 V 供電且能力大於 200 mA，UART 訊號為 3.3 V；不得把 VCC 接到 3.3 V，也不得把 5 V 送入 ESP32 GPIO。
+- **影響：**新增程式是獨立硬體 smoke，不由目前 `main.py` 匯入，也不改變正式 GPIO、設定或部署清單；GPIO2／14 只在執行此測試時由 UART1 使用。若日後其他硬體占用這兩腳，必須同步改測試程式的 TX/RX 常數與實體接線。
+- **驗證：**`test_ld2410b_uart.py` 與 `ld2410b_micropython.py` 通過 CPython `py_compile`。以 fake radar 執行實際 `main()` 路徑，確認以 UART1、TX14、RX2、256000 baud 初始化，依序輸出 moving 123 cm、stationary 88 cm、工程模式 light 31／out 1，並可由 `KeyboardInterrupt` 正常停止；既有驅動 fake UART smoke 再次通過雜訊／分段資料封包、little-endian 距離、命令 ACK 與命令封包檢查。尚未接上真實 ESP32-S3 與 LD2410B，因此未宣稱實體供電、UART 收訊、距離或能量值已通過。
+- **部署／回復：**先停止 ESP32 正式程式，將 `test_ld2410b_uart.py` 與 `ld2410b_micropython.py` 上傳到裝置同一目錄，再由 Thonny 直接執行測試檔；看到持續狀態列代表 UART 資料路徑可用，反覆 timeout 則依提示檢查接線。測試完成後按 `Ctrl+C`，移除測試檔或重新啟動正式程式。回復版本時以 Git revert 移除本測試檔與本筆紀錄，不動私人 `config.py`。
+
+
 ## CHG-20261117-053｜同步來源新增的 LD2410B 雷達資料
 
 - **類別：**需求變更（來源同步與元件資料）。
