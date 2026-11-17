@@ -16,6 +16,17 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261117-052｜保存課程簡報並同步目前主線
+
+- **類別：**需求變更（教學交付與版本保存）。
+- **日期／紀錄時間：**2026-11-17 13:57:13 +08:00，工具取得台北時間。
+- **原因：**使用者要求檢查目前 Git 狀態並推送既有遠端；工作區包含 CHG-20261106-049～CHG-20261108-051 已記錄但尚未提交的 OLED、按鈕長按、教材與測試變更，以及尚未納入版控的 `ESP32_uasyncio_課程報告_含長按流程圖.pptx`。
+- **作法：**先同步並比較 `origin/main`，確認遠端沒有本機尚未整合的提交；審查後保存 OLED 設定化、按鈕 1 短按／長按、`mdy_07/`、測試與教材更新，再納入 26 頁課程簡報。簡報第 6 頁原稱「畫面顯示正常」，但既有證據只有 I2C 掃描、SSD1306 初始化與寫入完成，因此改為「未以畫面核對像素」，避免擴大實機驗證結論。根目錄 `wifi.py` 含私人 WiFi 憑證，維持未追蹤且不納入提交；被忽略的私人 `config.py` 與 `99_All-11-2.py` 亦未加入版控。
+- **影響：**`main` 會新增目前程式、公開設定、備份、測試、教材、實機報告與課程簡報的可回溯版本，簡報內含報告人及兩位課堂回饋者姓名與回饋內容。ESP32 執行內容以 CHG-20261106-049 與 CHG-20261107-050 為準；本次版本保存不再部署裝置，也不公開私人 WiFi profiles。
+- **驗證：**`python -B -m unittest discover -s tests -v` 執行 54 項，53 項通過；唯一失敗仍是 `test_driver_protocol_and_full_sample_format` 讀到本機私人 `config.py` 的 RFID 腳位，而測試固定期待公開範例腳位，與本次變更無關。指定 Python 檔案 `py_compile` 通過。長按桌面 smoke 以實際 `button1_task`、`CommandService` 與 `LedController` 提交兩筆命令，觀察 `accepted`→`executed`、GPIO 輸出 `[0, 1]`、最終色碼 1、佇列深度 0。Mermaid 11.13.0 實際解析六份修改 Markdown 共 34 個區塊，34/34 通過。PowerPoint 實際匯出 26 張 PNG 並檢視整份縮圖，簡報 ZIP 封裝測試通過；未重新執行 ESP32 實機驗證。`mdy_07/hardware/button.py` 是修改前原樣快照，保留其既有 trailing whitespace；排除該快照後的 staged diff check 通過。
+- **部署／回復：**提交後推送既有 `origin/main`；簡報、測試與 Markdown 不需部署 ESP32。回復時依 Git 歷史 revert 本次簡報／紀錄提交及前一筆程式教材提交；裝置程式若需回復，依 CHG-20261106-049、CHG-20261107-050 與 `mdy_07/` 操作，且不得以 `config.example.py` 覆蓋私人 `config.py`。
+
+
 ## CHG-20261108-051｜完成綜合題 A 提交內容與課後反思
 
 - **類別：**需求變更（教學文件）。
