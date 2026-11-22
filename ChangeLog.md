@@ -16,6 +16,17 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261123-057｜新增 LD2410B 距離、有人狀態與移動能量監看程式
+
+- **類別：**需求變更（毫米波雷達獨立輸出範例）。
+- **日期／紀錄時間：**2026-11-23 01:20:56 +08:00，工具取得台北時間。
+- **原因：**使用者要求參考 `test_ld2410b_uart.py`，另外提供一支只輸出距離、是否有人與移動能量的簡單程式，避免以完整 UART 診斷流程作為日常監看介面。
+- **作法：**新增 `元件/01_毫米波雷達/ld2410b_presence_monitor.py`，沿用既有 `LD2410B` 驅動與目前根目錄 `test_ld2410b_uart.py` 的 UART1、ESP32 TX GPIO2、RX GPIO14、256000 baud 接線。每筆資料輸出 `detection_distance_cm`、依 target state code 判定的「有人／無人／未知」，以及 `moving_energy`；底噪檢測等非一般目標狀態顯示「未知」，不誤報為無人。程式在 `Ctrl+C` 後釋放 UART；本回合只新增檔案，沒有修改前版本可備份。
+- **影響：**新增程式是獨立監看範例，不由正式 `main.py` 匯入，不修改 `ld2410b_micropython.py`、私人 `config.py`、WiFi 設定或其他硬體任務。執行時 UART1 由此程式單獨占用，不應與其他雷達讀取者同時執行。
+- **驗證：**新範例與既有驅動通過 CPython `py_compile`。以 fake radar 實際執行 `main()`，確認 UART 參數為 TX2、RX14、256000 baud，輸入距離 175 cm、target state 1、移動能量 68 時輸出 `距離: 175 cm | 狀態: 有人 | 移動能量: 68`，`Ctrl+C` 路徑會停止並呼叫 UART `deinit()`；另確認 state code 0／1～3／4 分別映射為無人／有人／未知。尚未在 ESP32-S3 與真實 LD2410B 上執行，因此未宣稱實體距離、有人判定或能量值已驗證。
+- **部署／回復：**將 `ld2410b_presence_monitor.py` 與 `ld2410b_micropython.py` 上傳到 ESP32 同一目錄，依程式常數接線並停止其他 UART1 使用者後直接執行；若實際接線不同，先同步修改 TX／RX 常數。回復時移除新增範例或 Git revert 本次提交，不影響既有診斷程式與驅動。
+
+
 ## CHG-20261117-055｜修正 LD2410B 測試逾時無法判斷 UART 狀態
 
 - **類別：**BUG（真實開發板只重複顯示 frame timeout，無法區分無收訊、baudrate 不符或封包解析失敗）。
