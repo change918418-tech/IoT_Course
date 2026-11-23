@@ -67,6 +67,12 @@ class LD2410B:
         if chunk:
             self._buffer.extend(chunk)
 
+    def _discard_buffer_prefix(self, count):
+        """Discard bytes without bytearray item deletion, unsupported on MicroPython."""
+        if count <= 0:
+            return
+        self._buffer = self._buffer[count:]
+
     def _extract_frame(self):
         while len(self._buffer) >= 6:
             data_start = self._buffer.find(self.DATA_HEAD)
@@ -74,31 +80,31 @@ class LD2410B:
             starts = [item for item in (data_start, command_start) if item >= 0]
             if not starts:
                 # Keep only the bytes that may be the beginning of a split header.
-                del self._buffer[:-3]
+                self._discard_buffer_prefix(len(self._buffer) - 3)
                 return None
 
             start = min(starts)
             is_command = command_start >= 0 and command_start == start
             tail = self.CMD_TAIL if is_command else self.DATA_TAIL
             if start:
-                del self._buffer[:start]
+                self._discard_buffer_prefix(start)
             if len(self._buffer) < 6:
                 return None
 
             payload_length = self._u16(self._buffer, 4)
             if payload_length < 4 or payload_length > 128:
-                del self._buffer[0]
+                self._discard_buffer_prefix(1)
                 continue
 
             frame_length = 10 + payload_length
             if len(self._buffer) < frame_length:
                 return None
             if bytes(self._buffer[frame_length - 4:frame_length]) != tail:
-                del self._buffer[0]
+                self._discard_buffer_prefix(1)
                 continue
 
             frame = bytes(self._buffer[:frame_length])
-            del self._buffer[:frame_length]
+            self._discard_buffer_prefix(frame_length)
             return frame
         return None
 

@@ -16,6 +16,17 @@
 
 Git commit hash 由歷史查詢取得；不要求把包含本紀錄的 commit hash 寫回本紀錄，避免自我引用。既有程式中的 v1.1.x／v1.2 註解不是統一的專案版本，本次開始以 Git commit 與後續 tag 作為版本依據。
 
+## CHG-20261123-058｜修正 MicroPython 不支援 bytearray 項目刪除
+
+- **類別：**BUG（LD2410B 監看程式收到資料後於封包解析器崩潰）。
+- **日期／紀錄時間：**2026-11-23 16:13:30 +08:00，工具取得台北時間。
+- **現象／原因分析：**使用者在 MicroPython v1.26.1 執行 `ld2410b_presence_monitor.py`，進入 `LD2410B._extract_frame()` 後於 `del self._buffer[:frame_length]` 回報 `TypeError: 'bytearray' object doesn't support item deletion`；同板上的根目錄 `test_ld2410b_uart.py` 正常，因該檔使用 `buffer = buffer[index:]` 切片重新指派，而非 MicroPython 不支援的 `bytearray` 項目刪除。既有驅動共有五條 `del self._buffer...` 路徑，雜訊、無效長度、錯誤尾碼與正常封包都可能觸發。
+- **作法：**修改 `元件/01_毫米波雷達/ld2410b_micropython.py`，新增 `_discard_buffer_prefix()`，以已由正常測試證明可用的 bytearray 切片重新指派，取代五處項目／切片刪除；封包搜尋、長度限制、尾碼驗證與解析欄位不變。新增 `tests/test_ld2410b_driver.py`，以禁止 `__delitem__` 的 bytearray 模型重現該韌體限制，並驗證前置雜訊、連續兩框、第一框取出、第二框保留及欄位解析。修改前驅動原樣保存於 `mdy_09/元件/01_毫米波雷達/ld2410b_micropython.py`，兩者 Git blob hash 均為 `23f5f75ef90a19d4f1a94afff6c2f681ba6ee2ce`。
+- **影響：**只改變驅動丟棄已處理緩衝前綴的實作；`LD2410B` 公開建構、`read()`、命令 API、UART 腳位與監看程式輸出格式不變。切片重新指派會配置保留資料的新 bytearray，與目前可正常執行的測試程式策略一致，優先確保目標 MicroPython 韌體相容。
+- **驗證：**`tests.test_ld2410b_driver` 1 項通過；修正驅動、監看程式、回歸測試與 `mdy_09` 備份通過 CPython `py_compile`。以 fake UART 將前置雜訊與正常資料框送入實際驅動，再由監看程式 `main()` 輸出距離、有人狀態及移動能量，並確認停止時釋放 UART。嘗試連接實機 `COM9` 部署時得到 `PermissionError(13, '存取被拒。')`，序列埠正被其他程式占用，因此本次未覆蓋裝置檔案、未宣稱 ESP32 實機修正已通過。
+- **部署／回復：**關閉占用 `COM9` 的 Thonny／序列終端後，將新版 `ld2410b_micropython.py` 覆蓋 ESP32 根目錄同名檔，再 soft reboot 執行監看程式；不必修改目前正常的 `test_ld2410b_uart.py`。回復時用 `mdy_09` 備份覆蓋驅動，或 Git revert 本次提交。
+
+
 ## CHG-20261123-057｜新增 LD2410B 距離、有人狀態與移動能量監看程式
 
 - **類別：**需求變更（毫米波雷達獨立輸出範例）。
